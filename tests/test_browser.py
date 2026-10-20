@@ -87,6 +87,7 @@ class WindowsStartupTests(unittest.TestCase):
             app = App()
             try:
                 app.update_idletasks()
+                app.update()  # Process native Windows map events before visibility checks.
                 self.assertTrue(app.winfo_exists())
                 self.assertTrue(app.title().startswith(APP_TITLE))
                 self.assertEqual(app.user.get(), "")
@@ -105,6 +106,7 @@ class WindowsStartupTests(unittest.TestCase):
                 app.method.set(SSH_MODE)
                 app.change_method()
                 app.update_idletasks()
+                app.update()
                 self.assertTrue(app.ssh_form.winfo_ismapped())
                 app.method.set(WEB_MODE)
                 app.change_method()

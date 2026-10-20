@@ -1,5 +1,19 @@
 # 검증 결과
 
+## SSH / 개인 로그인 공용 tools (2026-10-21)
+
+`tools/check_shared_tools.py`로 공용 묶음의 필수 파일·Python 구문·JSON·규약 표기를 읽기 전용으로 검사합니다. 개인 로그인 설치기는 검사한 묶음에서 두 방식의 추출 코드를 설치하며, 재설치 시 기존 메일 경로·CSRF 비밀값·psql 경로·웹 작업 자료를 유지합니다. 미완성 도구 업로드는 설치 파일을 쓰기 전에 거부합니다. SSH 업로드 목록과 6개 런타임 파일은 `segio` v0.4.3 (`068a2f8`)과 동일합니다.
+
+Python 3.12, Chromium, Debian PHP 8.4.24에서 아래 관련 시험 **44개가 모두 통과**했으며 건너뛴 시험은 없습니다.
+
+```bash
+PYTHONPATH=.:tests:tools SEGIO_TEST_BROWSER=/path/to/chromium \
+  SEGIO_TEST_PHP=/path/to/php python -m unittest \
+  test_shared_tools test_ssh_archive test_live_archive test_db_client test_login_bridge -v
+```
+
+같은 설치 코드에서 SSH·개인 로그인 추출기를 별도 프로세스로 실행하고, SSH 작업 정리 후에도 웹 보관본이 남는 것과 다운로드 무결성을 확인했습니다. 실제 루프백 SSH/SFTP 이어받기·지문 확인과 합성 직원 로그인 → PHP 인증 → DB/MBOX 다운로드 → 본문·첨부·검색을 검증했습니다. DB는 합성 어댑터를 사용했으며 실제 SEGIO 운영 서버·운영 DB·CentOS/Python 2.6·Windows EXE 현장 동작은 이번 검사에 포함되지 않습니다. 기존 Windows 시작 시험에는 네이티브 창 표시 이벤트를 처리한 뒤 폼 표시 여부를 검사하도록 반영했습니다.
+
 ## v0.4.2 index.html에서 메일 본문·첨부 직접 열기
 
 SSH 백업 시 메일별 정적 HTML과 첨부·CID 이미지를 Windows의 `mail/offline`에 생성합니다. 첫 화면 목록은 이 HTML에 직접 연결합니다. ‘보관함 열기’ 안내로 가로막지 않으며, 준비 후 프로그램·로컬 HTTP 열람 서버를 종료해도 `index.html`로 결재·메일을 검색하고 열 수 있습니다. 본문 표를 유지하고 외부 이미지·스크립트·이벤트 속성을 제외합니다. 기본 글씨는 12px입니다.
