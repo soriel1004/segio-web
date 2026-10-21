@@ -247,7 +247,7 @@ def render_record(root, manifest, stream, record, checkpoint):
     manifest['files'].update(generated)
 
 
-def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None):
+def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None):
     root=root.resolve()
     if manifest is None:
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
@@ -257,9 +257,11 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
         return manifest
     from .db_client import safe_member
     count=0
+    report = progress or (lambda *args, **kwargs: None)
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
         db.row_factory=sqlite3.Row
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
+        report('render', 0, total, unit='messages')
         rows=db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON m.id=i.id ORDER BY m.source,m.begin')
         with SourceReader() as opened:
             for row in rows:
@@ -277,6 +279,7 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
                 stream=opened.open(path)
                 render_record(root,manifest,stream,record,checkpoint)
                 count+=1
+                report('render', count, total, unit='messages')
                 if count%100==0 or count==total:
                     log(f'메일 바로보기 생성 {count:,} / {total:,}건')
         if count!=total:
@@ -308,13 +311,13 @@ class SourceReader:
             self.stream.close()
 
 
-def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None):
+def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=None):
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
     manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('local_processing',{}).get('state') == 'pending' and isinstance(manifest.get('live_export'),dict):
         from .mail_import import build_local_catalog
-        return build_local_catalog(root,manifest['user'],checkpoint,log)
+        return build_local_catalog(root,manifest['user'],checkpoint,log,progress)
     if manifest.get('viewer')=='local-db/1' or (manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1' and (root/'catalog.sqlite3').is_file()):
         from .search_page import install_search_page
         return install_search_page(root,checkpoint=checkpoint)
@@ -328,6 +331,6 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None):
     if manifest.get('portable_mail',{}).get('version')==VERSION:
         from .search_page import install_search_page
         return install_search_page(root,checkpoint=checkpoint)
-    manifest=build_portable_mail(root,manifest,checkpoint,log)
+    manifest=build_portable_mail(root,manifest,checkpoint,log,progress)
     from .search_page import install_search_page
     return install_search_page(root,manifest,checkpoint)

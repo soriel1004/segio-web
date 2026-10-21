@@ -84,6 +84,7 @@ def install(web_user, config, root=None, mail_template=None):
     print('Installed live employee DB/MBOX export: /segio/archive/live.php')
     print('PHP bridge revision: php-runtime-3; worker control: segio-worker-control/1.')
     print('Approval exporter revision: db-native-paths-1.')
+    print('Mail copy revision: mail-retry-progress-1.')
     print('Private configuration: ' + path)
     print('Mail template: ' + settings['mail_template'])
     print('No employee archive was prepared. Windows login starts a fresh job.')

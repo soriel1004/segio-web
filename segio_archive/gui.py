@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -12,6 +13,7 @@ from .archive import verify_archive, STATES
 from .browser import BrowserUnavailable
 from .web import CollectionError, Config, DEFAULT_SERVER
 from . import __version__
+from .progress import ProgressReporter, describe_progress
 
 DB_MODE = "개인 SEGIO 로그인으로 자료 받기"
 APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
@@ -40,6 +42,9 @@ class App(tk.Tk):
         self.http = tk.BooleanVar(value=True)
         self.manual = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
+        self.progress_text = tk.StringVar(value='백업을 시작하면 단계별 처리량을 표시합니다.')
+        self.progress_detail = ''
+        self.started_at = None
         self.build()
         self.after(100, self.poll)
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -93,6 +98,7 @@ class App(tk.Tk):
         ttk.Label(panel, textvariable=self.status, wraplength=770).pack(anchor="w", pady=(14, 6))
         self.progress = ttk.Progressbar(panel, mode="indeterminate")
         self.progress.pack(fill="x", pady=(0, 8))
+        ttk.Label(panel, textvariable=self.progress_text, wraplength=770).pack(anchor='w', pady=(0, 8))
         self.log_text = tk.Text(panel, height=7, wrap="word", state="disabled")
         self.log_text.pack(fill="both", expand=True)
         ttk.Label(panel, text="수집 후 오프라인 열람·누락 대조를 수행하세요. 계정 삭제 영향 시험과 서버 전체 백업은 별도입니다.", wraplength=770).pack(anchor="w", pady=(10, 0))
@@ -114,6 +120,7 @@ class App(tk.Tk):
                             output=Path(self.folder.get()), approvals=self.approvals.get(),
                             mail=self.mail.get(), pdf=False, allow_http=self.http.get(),
                             manual_login=self.manual.get(), cancel=self.cancel_event)
+            config.progress = lambda event:self.events.put(('progress',event))
             password = self.password.get()
             if not password and not config.manual_login:
                 raise ValueError("그룹웨어 암호를 입력하거나 브라우저 직접 로그인을 선택하세요.")
@@ -124,7 +131,7 @@ class App(tk.Tk):
         self.running = True
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
-        self.progress.start()
+        self.begin_progress('그룹웨어 로그인 · 연결 준비 중')
         self.status.set("수집 중입니다. 프로그램이 연 브라우저 창을 닫지 마세요.")
         threading.Thread(target=self.worker, args=(config, password), daemon=True).start()
 
@@ -149,7 +156,9 @@ class App(tk.Tk):
         try:
             while True:
                 event, value = self.events.get_nowait()
-                if event == "log":
+                if event == 'progress':
+                    self.update_progress(value)
+                elif event == "log":
                     self.log_text.config(state="normal")
                     self.log_text.insert("end", value + "\n")
                     self.log_text.see("end")
@@ -160,15 +169,18 @@ class App(tk.Tk):
                     self.start_button.config(state="normal")
                     self.stop_button.config(state="disabled")
                     if event == 'archive_ready':
+                        self.finish_progress('기존 백업 갱신 완료', True)
                         self.last_archive=value
                         self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
                         webbrowser.open((value/'index.html').as_uri())
                     elif event == 'archive_error':
+                        self.finish_progress(self.progress_detail + ' · 중단 또는 오류', False)
                         self.status.set(value)
                         messagebox.showerror('백업 갱신 확인',value)
                     elif event == "done":
                         self.last_archive = value
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
+                        self.finish_progress('백업 실패' if manifest['state']=='failed' else '백업 완료', manifest['state']!='failed')
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
                         if manifest["state"] == "failed":
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
@@ -176,11 +188,49 @@ class App(tk.Tk):
                         else:
                             messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
                     else:
+                        self.finish_progress(self.progress_detail + ' · 중단 또는 오류', False)
                         self.status.set(value)
                         messagebox.showerror("수집 실패", value)
         except queue.Empty:
             pass
+        self.refresh_progress_text()
         self.after(100, self.poll)
+
+    def refresh_progress_text(self):
+        if self.started_at is not None:
+            seconds = int(time.monotonic() - self.started_at)
+            self.progress_text.set('%s · 경과 %02d:%02d:%02d' %
+                                   (self.progress_detail, seconds//3600, seconds//60%60, seconds%60))
+            if not self.running:
+                self.started_at = None
+
+    def finish_progress(self, detail, success):
+        self.progress.stop()
+        if success:
+            self.progress.config(mode='determinate', value=100)
+        elif str(self.progress.cget('mode'))=='indeterminate':
+            self.progress.config(mode='determinate', value=0)
+        self.progress_detail = detail
+        self.refresh_progress_text()
+
+    def begin_progress(self, detail):
+        self.started_at = time.monotonic()
+        self.progress_detail = detail
+        self.progress_text.set(detail)
+        self.progress.stop()
+        self.progress.config(mode='indeterminate', value=0)
+        self.progress.start()
+
+    def update_progress(self, value):
+        self.progress_detail, percent = describe_progress(value)
+        mode = 'indeterminate' if percent is None else 'determinate'
+        if str(self.progress.cget('mode')) != mode:
+            self.progress.stop()
+            self.progress.config(mode=mode, value=0)
+            if percent is None:
+                self.progress.start()
+        if percent is not None:
+            self.progress.config(value=percent)
 
     def stop(self):
         self.cancel_event.set()
@@ -210,7 +260,7 @@ class App(tk.Tk):
                         self.cancel_event=threading.Event()
                         self.start_button.config(state='disabled')
                         self.stop_button.config(state='normal')
-                        self.progress.start()
+                        self.begin_progress('기존 백업의 메일 본문·첨부 준비 중')
                         self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')
                         threading.Thread(target=self.archive_worker,args=(path,),daemon=True).start()
                         return
@@ -235,7 +285,8 @@ class App(tk.Tk):
             if self.cancel_event.is_set():
                 raise Cancelled('메일 변환을 중단했습니다. 기존 백업 갱신을 다시 누르면 완료한 메일을 재사용합니다.')
         try:
-            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)))
+            report = ProgressReporter(lambda event:self.events.put(('progress',event)))
+            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)),report)
             self.events.put(('archive_ready',path))
         except Cancelled as exc:
             self.events.put(('archive_error',str(exc)))

@@ -52,6 +52,8 @@ def load_bundle(directory):
         raise BundleError('Use the original live_archive_bridge.php template.')
     if b'db-native-paths-1' not in contents['export_approval_db.py']:
         raise BundleError('Unsupported approval exporter revision.')
+    if b'mail-retry-progress-1' not in contents['live_export_worker.py']:
+        raise BundleError('Unsupported mail copy revision.')
     return contents
 
 
@@ -69,6 +71,7 @@ def main():
     print('Shared tools OK: %d files; SSH archive /1 and employee login /1.' % len(contents))
     print('Worker control protocol: segio-worker-control/1; PHP bridge revision: php-runtime-3.')
     print('Approval exporter revision: db-native-paths-1.')
+    print('Mail copy revision: mail-retry-progress-1.')
     print('No server configuration, credentials, permissions or jobs changed.')
     print('This is a local bundle check, not a server login or DB connectivity test.')
     return 0

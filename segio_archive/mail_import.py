@@ -29,7 +29,7 @@ def header_text(value):
         return str(value or '')
 
 
-def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _:None):
+def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _:None, progress=None):
     """Personal-login archives use the same bounded SQLite/MIME pipeline as SSH."""
     from .archive import atomic_write
     from .compact_mail import build_compact_catalog, digest_file
@@ -83,7 +83,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
     # Raw messages stay intact; reserve another raw-mail-sized allowance for
     # decoded attachments, bounded body previews and filesystem metadata.
     require_space(root, raw_bytes + max(512*1024*1024, raw_bytes//20), '메일 본문·첨부 생성')
-    result = build_compact_catalog(root, user, checkpoint, log)
+    result = build_compact_catalog(root, user, checkpoint, log, progress)
     result.pop('local_processing', None)
     atomic_write(root/'manifest.json', json.dumps(result,ensure_ascii=False,indent=2).encode('utf-8'))
     return result

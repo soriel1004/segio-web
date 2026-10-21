@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "segio-archive"
-version = "0.5.4"
+version = "0.5.5"
 description = "SEGIO 결재 문서와 메일의 Windows 오프라인 보관 도구"
 requires-python = ">=3.11"
 dependencies = ["beautifulsoup4==4.14.3", "playwright==1.62.0", "paramiko==4.0.0"]

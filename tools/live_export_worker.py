@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 from optparse import OptionParser
 
 from export_approval_db import run_export
@@ -22,6 +23,7 @@ from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
 CONTROL_PROTOCOL = 'segio-worker-control/1'
+MAIL_COPY_REVISION = 'mail-retry-progress-1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
@@ -163,42 +165,106 @@ def inventory(root):
     return sorted(result)
 
 
-def copy_mail(template, user, folder, manifest, checkpoint):
-    root = mail_path(template, user)
-    before = inventory(root)
-    sources = []
-    for number, (name, path, expected) in enumerate(before):
-        checkpoint()
-        relative = 'mail/raw/%06d.bin' % number
-        destination = os.path.join(folder, *relative.split('/'))
-        if not os.path.isdir(os.path.dirname(destination)):
-            os.makedirs(os.path.dirname(destination), 0o700)
-        digest, count = hashlib.sha256(), 0
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        source = os.fdopen(descriptor, 'rb')
-        target = open(destination, 'wb')
-        try:
-            opened = os.fstat(source.fileno())
-            actual = file_identity(opened)
-            if actual != expected:
-                raise MailChanged('open', expected, actual)
+def copy_mail_file(path, destination, expected, checkpoint, progress):
+    """Copy a stable regular file; never accept a changing prefix as complete."""
+    digest, count = hashlib.sha256(), 0
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    source = os.fdopen(descriptor, 'rb')
+    try:
+        actual = file_identity(os.fstat(source.fileno()))
+        if actual != expected:
+            raise MailChanged('open', expected, actual)
+        with open(destination, 'wb') as target:
             while True:
                 checkpoint()
-                block = source.read(1024 * 1024)
+                block = source.read(min(1024 * 1024, expected[2] - count + 1))
                 if not block:
                     break
-                target.write(block)
-                digest.update(block)
                 count += len(block)
                 if count > expected[2]:
-                    raise SafeError('mail_changed_retry')
-        finally:
-            source.close()
-            target.close()
+                    raise MailChanged('copy', expected, file_identity(os.fstat(source.fileno())))
+                target.write(block)
+                digest.update(block)
+                progress(count)
         actual = fingerprint(path)
         if count != expected[2] or actual != expected:
             raise MailChanged('copy', expected, actual)
-        manifest['files'][relative] = {'bytes': count, 'sha256': digest.hexdigest()}
+        return {'bytes': count, 'sha256': digest.hexdigest()}
+    finally:
+        source.close()
+
+
+def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fields: None):
+    root = mail_path(template, user)
+    cached, slots = {}, {}
+    failure = SafeError('mail_changed_retry')
+    # Reuse stable files on retry, but reconcile the entire inventory before
+    # publishing. New/deleted/renamed files cannot silently disappear.
+    for attempt in range(1, 4):
+        checkpoint()
+        root = mail_path(template, user)
+        try:
+            before = inventory(root)
+        except (IOError, OSError) as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        total = sum(item[2][2] for item in before)
+        completed, files_done = 0, 0
+        progress(completed_bytes=0, total_bytes=total, completed_files=0,
+                 total_files=len(before), attempt=attempt)
+        for name, path, expected in before:
+            checkpoint()
+            if name not in slots:
+                slots[name] = len(slots)
+            relative = 'mail/raw/%06d.bin' % slots[name]
+            destination = os.path.join(folder, *relative.split('/'))
+            if not os.path.isdir(os.path.dirname(destination)):
+                os.makedirs(os.path.dirname(destination), 0o700)
+            def copying(count):
+                progress(completed_bytes=completed + count, total_bytes=total,
+                         completed_files=files_done, total_files=len(before), attempt=attempt)
+            if name not in cached or cached[name][0] != expected:
+                cached.pop(name, None)
+                try:
+                    info = copy_mail_file(path, destination, expected, checkpoint, copying)
+                    cached[name] = (expected, info)
+                except MailChanged as exc:
+                    failure = exc
+                    if os.path.exists(destination):
+                        os.unlink(destination)
+                    continue
+                except (IOError, OSError) as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise
+                    if os.path.exists(destination):
+                        os.unlink(destination)
+                    continue
+            completed += expected[2]
+            files_done += 1
+            copying(0)
+        try:
+            after = inventory(root)
+        except (IOError, OSError) as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        if after == before and all(name in cached and cached[name][0] == expected
+                                   for name, path, expected in before):
+            break
+    else:
+        raise failure
+    sources = []
+    present = set(name for name, path, expected in before)
+    for name in slots:
+        if name not in present:
+            stale = os.path.join(folder, 'mail', 'raw', '%06d.bin' % slots[name])
+            if os.path.exists(stale):
+                os.unlink(stale)
+    for name, path, expected in before:
+        relative = 'mail/raw/%06d.bin' % slots[name]
+        info = cached[name][1]
+        manifest['files'][relative] = info
         raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape' if sys.version_info[0]>=3 else 'strict')
         try:
             display_name = raw_name.decode('utf-8')
@@ -208,9 +274,7 @@ def copy_mail(template, user, folder, manifest, checkpoint):
             except UnicodeError:
                 display_name = raw_name.decode('utf-8', 'replace')
         sources.append({'name': display_name, 'name_bytes_hex': binascii.hexlify(raw_name).decode('ascii'),
-                        'path': relative, 'bytes': count, 'sha256': digest.hexdigest()})
-    if inventory(root) != before:
-        raise SafeError('mail_changed_retry')
+                        'path': relative, 'bytes': info['bytes'], 'sha256': info['sha256']})
     path = os.path.join(folder, 'mail', 'sources.json')
     if not os.path.isdir(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), 0o700)
@@ -220,6 +284,68 @@ def copy_mail(template, user, folder, manifest, checkpoint):
     manifest['files']['mail/sources.json'] = {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
     manifest['counts']['mail_files'] = len(sources)
     manifest['coverage'].append({'kind': 'mail', 'status': 'raw_files_copied', 'files': len(sources)})
+
+
+class PackingProgress:
+    """Observe actual ZIP output on both Python 2.6 and modern zipfile."""
+    def __init__(self, stream, checkpoint, report):
+        self.stream, self.checkpoint, self.report = stream, checkpoint, report
+        self.high_water = 0
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+    def write(self, data):
+        self.checkpoint()
+        result = self.stream.write(data)
+        self.high_water = max(self.high_water, self.stream.tell())
+        self.report(completed_bytes=self.high_water, total_bytes=None)
+        return result
+
+
+def write_archive_file(archive, path, name):
+    """Python 2.6 write() omits ZIP64 local headers for large single files."""
+    info = os.stat(path)
+    if sys.version_info >= (2, 7) or info.st_size <= zipfile.ZIP64_LIMIT:
+        return archive.write(path, name)
+    # Backport the fixed-size-header strategy. Staged input is immutable, so
+    # reserve ZIP64 before streaming and rewrite the complete header afterward.
+    item = zipfile.ZipInfo(name, time.localtime(info.st_mtime)[:6])
+    item.compress_type = archive.compression
+    item.external_attr = (info.st_mode & 0xffff) << 16
+    item.header_offset = archive.fp.tell()
+    item.file_size, item.compress_size, item.CRC = info.st_size, 0, 0
+    archive._writecheck(item)
+    archive._didModify = True
+    header = item.FileHeader()
+    archive.fp.write(header)
+    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+    size, compressed, crc = 0, 0, 0
+    with open(path, 'rb') as source:
+        while True:
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            size += len(block)
+            crc = binascii.crc32(block, crc) & 0xffffffff
+            data = compressor.compress(block)
+            archive.fp.write(data)
+            compressed += len(data)
+    data = compressor.flush()
+    archive.fp.write(data)
+    compressed += len(data)
+    if size != info.st_size:
+        raise SafeError('invalid_metadata')
+    item.file_size, item.compress_size, item.CRC = size, compressed, crc
+    final_header = item.FileHeader()
+    if len(final_header) != len(header):
+        raise SafeError('invalid_metadata')
+    position = archive.fp.tell()
+    archive.fp.seek(item.header_offset)
+    archive.fp.write(final_header)
+    archive.fp.seek(position)
+    archive.filelist.append(item)
+    archive.NameToInfo[item.filename] = item
 
 
 def run_job(config_path, job_id):
@@ -240,6 +366,13 @@ def run_job(config_path, job_id):
     def checkpoint():
         if os.path.exists(os.path.join(job, 'cancel')):
             raise SafeError('cancelled')
+    last_progress = [None, 0, None]
+    def report(phase, **fields):
+        now = time.time()
+        attempt = fields.get('attempt')
+        if phase != last_progress[0] or attempt != last_progress[2] or now - last_progress[1] >= 1:
+            status('running', phase, progress=fields)
+            last_progress[:] = [phase, now, attempt]
     work = os.path.join(job, 'work')
     stage = 'initializing'
     try:
@@ -267,7 +400,8 @@ def run_job(config_path, job_id):
         if request.get('mail') is True:
             stage = 'mail'
             status('running', 'mail')
-            copy_mail(config.get('mail_template'), user, folder, manifest, checkpoint)
+            copy_mail(config.get('mail_template'), user, folder, manifest, checkpoint,
+                      lambda **fields: report('mail', **fields))
         manifest['live_export'] = {'requested_at': request['created_at'], 'job': job_id,
                                    'approvals': request.get('approvals') is True, 'mail': request.get('mail') is True}
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -276,23 +410,30 @@ def run_job(config_path, job_id):
         status('running', 'packing')
         archive_path = os.path.join(job, 'archive.zip')
         archive = zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
+        archive.fp = PackingProgress(archive.fp, checkpoint,
+                                     lambda **fields: report('packing', **fields))
         try:
             for current, dirs, files in os.walk(folder):
                 for name in files:
                     checkpoint()
                     path = os.path.join(current, name)
-                    archive.write(path, os.path.relpath(path, folder).replace(os.sep, '/'))
+                    write_archive_file(archive, path, os.path.relpath(path, folder).replace(os.sep, '/'))
         finally:
             archive.close()
         checkpoint()
         stage = 'hashing'
+        status('running', 'hashing')
         digest = hashlib.sha256()
+        hashed, archive_size = 0, os.path.getsize(archive_path)
         with open(archive_path, 'rb') as stream:
             while True:
+                checkpoint()
                 block = stream.read(1024 * 1024)
                 if not block:
                     break
                 digest.update(block)
+                hashed += len(block)
+                report('hashing', completed_bytes=hashed, total_bytes=archive_size)
         shutil.rmtree(work)
         status('ready', 'ready', version=job_id, bytes=os.path.getsize(archive_path),
                sha256=digest.hexdigest(), counts=manifest['counts'], prepared_at=manifest['finished_at'])

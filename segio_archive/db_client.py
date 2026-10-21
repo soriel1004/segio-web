@@ -26,6 +26,7 @@ from .browser import BrowserUnavailable, launch_browser
 from .archive import safe_name
 from .web import Collector, CollectionError, Config, origin
 from .client_diagnostics import BridgeResponseError, response_summary, write_failure
+from .progress import ProgressReporter
 
 BRIDGE = "/segio/archive/bridge.php"
 PROTOCOL = "segio-login-archive/1"
@@ -99,7 +100,7 @@ def safe_member(name):
     return path
 
 
-def unpack_verified(source: Path, destination: Path, username: str, checkpoint=lambda: None):
+def unpack_verified(source: Path, destination: Path, username: str, checkpoint=lambda: None, progress=None):
     """Extract only manifest-listed regular files into a new private staging dir."""
     with zipfile.ZipFile(source) as archive:
         members = archive.infolist()
@@ -129,6 +130,9 @@ def unpack_verified(source: Path, destination: Path, username: str, checkpoint=l
         total = sum(m.file_size for m in members)
         if total + 64*1024*1024 > shutil.disk_usage(destination).free:
             raise CollectionError("ZIP 압축을 풀 저장 공간이 부족합니다.")
+        verified = 0
+        report = progress or (lambda *args, **kwargs: None)
+        report('verify', 0, total)
         for name, expected in files.items():
             checkpoint()
             path = safe_member(name)
@@ -146,9 +150,12 @@ def unpack_verified(source: Path, destination: Path, username: str, checkpoint=l
                     count += len(block)
                     outgoing.write(block)
                     digest.update(block)
+                    verified += len(block)
+                    report('verify', verified, total)
             if count!=expected['bytes'] or digest.hexdigest()!=expected['sha256']:
                 raise CollectionError("내려받은 보관 파일의 SHA-256 검증에 실패했습니다.")
         (destination / 'manifest.json').write_bytes(manifest_bytes)
+        report('verify', total, total)
     return manifest
 
 
@@ -197,6 +204,7 @@ class PreparedDBCollector(Collector):
         super().__init__(config, log)
         self.phase = '시작'
         self.failure_path = None
+        self.progress = ProgressReporter(config.progress)
         self.user_agent = None
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
             raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
@@ -269,6 +277,7 @@ class PreparedDBCollector(Collector):
             self.log("DB 보관 ZIP 다운로드 중")
             next_progress = time.monotonic()+5
             self.phase = '보관 ZIP 다운로드'
+            self.progress('download', 0, record['bytes'])
             try:
                 with opener.open(request, timeout=60) as incoming, archive.open('xb') as outgoing:
                     if incoming.status!=200 or incoming.headers.get_content_type()!='application/zip':
@@ -282,6 +291,7 @@ class PreparedDBCollector(Collector):
                             raise CollectionError("보관 ZIP 크기가 검증 정보와 다릅니다.")
                         outgoing.write(block)
                         digest.update(block)
+                        self.progress('download', count, record['bytes'])
                         if time.monotonic() >= next_progress:
                             self.log('다운로드 %.1f / %.1f GiB (%.0f%%)' %
                                      (count/1024**3, record['bytes']/1024**3, count*100/record['bytes']))
@@ -293,7 +303,7 @@ class PreparedDBCollector(Collector):
                 raise CollectionError("ZIP의 크기 또는 SHA-256 검증에 실패했습니다. 보관 완료로 처리하지 않았습니다.")
             self.log("ZIP과 내부 파일 검증 중")
             self.phase = '내려받은 파일 검증'
-            unpack_verified(archive, destination, self.config.username, self.checkpoint)
+            unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
             self.validate_download(destination)
             if not self.keep_zip:
                 archive.unlink()
@@ -310,6 +320,7 @@ class PreparedDBCollector(Collector):
                 atomic_write(destination/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
                 saved = publish_local(destination, None, output, self.config.username+'-partial')
                 raise CollectionError('다운로드와 원본 검증은 끝났지만 로컬 색인을 완료하지 못했습니다. 저장 공간을 확인한 뒤 ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(saved)+' [LOCAL_INDEX_PENDING]') from None
+            self.progress('finalize')
             return publish_local(destination, archive if self.keep_zip else None, output, self.config.username)
 
     def run(self, password: str) -> Path:
@@ -318,6 +329,7 @@ class PreparedDBCollector(Collector):
             self.checkpoint()
             with sync_playwright() as p:
                 self.phase = '브라우저 시작'
+                self.progress('login')
                 self.browser = launch_browser(p.chromium, headless=self.config.headless,
                                               explicit=self.config.browser_executable, log=self.log)
                 try:
@@ -456,7 +468,7 @@ class DBCollector(PreparedDBCollector):
             'native_login_required':'SEGIO 직원 로그인을 확인하지 못했습니다. ID·암호와 서버 인증 연결을 확인하세요.',
             'mail_path_unconfigured':'서버의 직원별 메일 저장 경로가 설정되지 않았습니다.',
             'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
-            'mail_changed_retry':'복사 중 서버 메일이 변경되었습니다. 메일이 변경되지 않는 시간에 다시 실행하세요.',
+            'mail_changed_retry':'서버 메일이 변경되어 안정적인 원본을 확보하지 못했습니다. 메일 정리·이동을 멈추고 다시 실행하거나 메일 사용이 적은 시간에 실행하세요.',
             'export_already_running':'이 직원의 추출 작업이 이미 진행 중입니다. 완료 후 다시 실행하세요.',
             'export_busy':'서버에서 다른 추출 작업이 진행 중입니다. 잠시 후 다시 실행하세요.',
             'export_process_unavailable':'서버 추출 작업기를 시작하지 못했습니다. Python·실행 계정 권한을 확인하세요.',
@@ -556,9 +568,14 @@ class DBCollector(PreparedDBCollector):
             if status.get('job')!=self.job:
                 raise CollectionError('서버 작업 번호가 일치하지 않습니다.')
             phase = status.get('phase')
+            measured = status.get('progress')
+            measured = measured if isinstance(measured,dict) else {}
+            self.progress(phase, measured.get('completed_bytes'), measured.get('total_bytes'),
+                          attempt=measured.get('attempt'))
             if phase!=previous:
                 self.log({'queued':'서버 추출 요청 접수', 'database':'로그인한 직원의 DB 자료를 읽는 중',
                           'mail':'서버 MBOX 원본 전체를 복사하는 중', 'packing':'전송 자료를 압축하는 중',
+                          'hashing':'서버 전송 ZIP의 무결성을 검증하는 중',
                           'ready':'이번 요청의 DB·MBOX 추출 완료'}.get(phase,'서버 추출 작업 확인 중'))
                 previous = phase
             if status.get('state')=='failed':
@@ -590,7 +607,7 @@ class DBCollector(PreparedDBCollector):
         from .mail_import import build_local_catalog
         self.phase = 'Windows DB·메일 검색 색인 생성'
         self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
-        build_local_catalog(destination, self.config.username, self.checkpoint, self.log)
+        build_local_catalog(destination, self.config.username, self.checkpoint, self.log, self.progress)
 
     def cleanup_remote(self):
         if self.job and self.csrf:

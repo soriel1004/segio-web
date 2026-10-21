@@ -224,8 +224,15 @@ class LiveWorkerTests(unittest.TestCase):
                 if calls==3:
                     with (root/'home/e/employee/mbox/inbox.mbox').open('ab') as stream:
                         stream.write(b'new incoming mail')
-            with self.assertRaisesRegex(worker.SafeError,'mail_changed_retry'):
-                worker.copy_mail(settings['mail_template'],'employee',str(target),{'files':{},'counts':{},'coverage':[]},changed)
+            manifest={'files':{},'counts':{},'coverage':[]}
+            progress=[]
+            worker.copy_mail(settings['mail_template'],'employee',str(target),manifest,changed,
+                             lambda **fields:progress.append(fields))
+            source=next(item for item in worker.read_json(str(target/'mail/sources.json'))['sources']
+                        if item['name']=='inbox.mbox')
+            self.assertEqual((target/source['path']).read_bytes(),
+                             (root/'home/e/employee/mbox/inbox.mbox').read_bytes())
+            self.assertTrue(any(event['attempt']>1 for event in progress))
 
     def test_current_database_and_whole_user_mail_are_exported_without_other_account(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -355,9 +362,11 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
             self.assertEqual(mode,'r','Personal downloads must not create an additional local ZIP')
             return original_zip(path, mode, *args, **kwargs)
         with tempfile.TemporaryDirectory() as tmp:
+            events=[]
             config = Config(self.url+'/', 'employee', Path(tmp), mail=True, pdf=False,
                 allow_http=True, headless=True, timeout_ms=10000,
                 browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            config.progress=events.append
             with patch('segio_archive.db_client.zipfile.ZipFile',side_effect=read_only_zip):
                 result=DBCollector(config).run(PASSWORD)
             self.assertTrue(verify_archive(result)['ok'])
@@ -365,6 +374,10 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
             self.assertEqual(list(Path(tmp).glob('*.zip')),[])
             self.assertFalse(list(Path(tmp).glob('.segio-download-*')))
             self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),self.original)
+            for stage in ('download','verify','index','render'):
+                measured=[event for event in events if event['stage']==stage]
+                self.assertTrue(measured,stage)
+                self.assertEqual(measured[-1]['completed'],measured[-1]['total'])
 
     def unavailable_child_status(self, text):
         text = text.replace('proc_get_status($process)', 'test_unavailable_status($process)')

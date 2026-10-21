@@ -2,7 +2,28 @@
 
 **[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
 
-이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.3)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
+이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
+
+## 메일 변경 자동 재시도·진행률
+
+`mail-retry-progress-1`은 개인 로그인 추출 중 메일 변경 시 변경된 파일만 최대 두 번 재복사합니다. 변경 없는 파일은 재사용하고 최종 원본 목록과 파일 정보를 다시 대조합니다. 새 파일·삭제·이름 변경도 반영하며, 계속 변경되면 완료로 처리하지 않습니다. 메일 정리·이동을 잠시 중단하거나 사용량이 적은 시간에 다시 시도하세요. 원본 메일·권한·인증 설정은 변경하지 않습니다.
+
+서버 상태 조회에 메일 복사 용량·재시도 횟수·ZIP 생성 용량·해시 검사 용량을 추가했습니다. v0.5.5 Windows 프로그램에서 해당 진행률을 표시합니다. 이전 프로그램의 통신 규약과 SSH 파일 목록은 유지됩니다. 아래 root SSH 명령으로 서버 도구를 갱신하고 Windows 프로그램도 v0.5.5로 실행하세요. 진행 중인 백업이 끝난 뒤 설치합니다. 그룹웨어 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.5.5.zip \
+  -o "$TOOLS_DIR/segio-web-0.5.5.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.5.5.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.5.5/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+검사·설치 결과의 `Mail copy revision: mail-retry-progress-1.`을 확인합니다. `db-native-paths-1` 한글 경로 수정도 포함합니다. 기존 PHP runtime-3과 SSH 전용 프로그램은 계속 사용할 수 있습니다. 이 재복사는 개인 로그인 서버 내 메일 복사에 적용하며 SSH 직접 다운로드의 기존 변경 감지·이어받기 규칙은 유지합니다.
+
+Python 2.6에서 단일 대형 파일을 전송 ZIP으로 만들 때 필요한 ZIP64 로컬 헤더도 보완했습니다. 메일을 메모리에 한꺼번에 올리지 않고 스트리밍 압축하며, 실제 Python 2.6의 4GB 초과 희소 파일을 압축·해제해 모든 바이트를 대조했습니다. 이 검사는 40~50GB 운영 메일함 전체 백업 시험을 대신하지 않습니다.
 
 ## 결재 DB 추출 단계의 encoding 오류
 

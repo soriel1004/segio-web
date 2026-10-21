@@ -64,7 +64,7 @@ def read_headers(stream, start, end):
     return BytesHeaderParser(policy=policy.compat32).parsebytes(bytes(header))
 
 
-def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None):
+def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None, progress=None):
     from .db_client import safe_member
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('user') != user or not (manifest.get('ssh_export', {}).get('authentication') == 'administrator_ssh' or isinstance(manifest.get('live_export'), dict)):
@@ -76,6 +76,10 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     database, temporary = root/'catalog.sqlite3', root/'catalog.sqlite3.partial'
     temporary.unlink(missing_ok=True)
     mail_count, issue_count = 0, 0
+    report = progress or (lambda *args, **kwargs: None)
+    total_bytes = sum(source['bytes'] for source in sources['sources'])
+    indexed_bytes = 0
+    report('index', 0, total_bytes)
     with closing(sqlite3.connect(temporary)) as db:
         db.execute('PRAGMA temp_store=FILE')
         db.execute('PRAGMA cache_size=-8192')
@@ -108,6 +112,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                 spans = [(0, source['bytes'])]
             else:
                 issue_count += 1
+                indexed_bytes += source['bytes']
+                report('index', indexed_bytes, total_bytes)
                 continue
             with path.open('rb') as stream:
                 for start, end in spans:
@@ -121,9 +127,12 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                     db.execute('INSERT INTO mail_records VALUES (?,?,?,?,?,?,?)',
                                (identity, name, start, end, sender, receiver, date))
                     mail_count += 1
+                    report('index', indexed_bytes + end, total_bytes)
                     if mail_count % 1000 == 0:
                         db.commit()
                         log(f'메일 제목 색인 {mail_count:,}건')
+            indexed_bytes += source['bytes']
+            report('index', indexed_bytes, total_bytes)
         db.execute('CREATE INDEX title_index ON items(kind,title)')
         db.commit()
     temporary.replace(database)
@@ -141,7 +150,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
         manifest['warnings'].append(f'인식하지 못한 메일 원본 파일 {issue_count}개는 원본 그대로 보존했습니다.')
     files['catalog.sqlite3'] = digest_file(database, checkpoint)
     from .portable_mail import build_portable_mail
-    manifest=build_portable_mail(root,manifest,checkpoint,log)
+    manifest=build_portable_mail(root,manifest,checkpoint,log,progress)
     from .search_page import install_search_page
     return install_search_page(root, manifest, checkpoint)
 
