@@ -303,6 +303,91 @@ class LiveInstallationTests(unittest.TestCase):
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
 
+    def test_cached_process_status_survives_proc_close_minus_one(self):
+        bridge = self.root/'live.php'
+        original = bridge.read_text()
+        text = original.replace("function_exists('random_bytes')", 'false')
+        text = text.replace("@fopen('/dev/urandom','rb')", "@fopen(__DIR__.'/missing-random','rb')")
+        text = text.replace("function_exists('openssl_random_pseudo_bytes')", 'false')
+        text = text.replace('proc_close($process)', 'test_lost_close_status($process)')
+        text = text.replace('function new_job_id(',
+            'function test_lost_close_status($process) { proc_close($process); return -1; }\nfunction new_job_id(')
+        try:
+            bridge.write_text(text)
+            with tempfile.TemporaryDirectory() as tmp:
+                config = Config(self.url+'/', 'employee', Path(tmp), mail=True, pdf=False,
+                    allow_http=True, headless=True, timeout_ms=10000,
+                    browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                result = DBCollector(config).run(PASSWORD)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(), self.original)
+        finally:
+            bridge.write_text(original)
+
+    def test_php_runtime_diagnostic_requires_login_and_hides_tokens_and_stderr(self):
+        import urllib.error
+        from test_login_bridge import local_opener
+        url = self.url+'/segio/archive/live.php?action=diagnostic'
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            local_opener().open(url, timeout=5)
+        with caught.exception as response:
+            self.assertEqual(response.code, 401)
+            value = json.load(response)
+            self.assertEqual(value['protocol'], 'segio-live-archive/1')
+            self.assertEqual(value['error'], 'native_login_required')
+        opener = self.logged_in()
+        launcher = self.live_root/'worker.py'
+        original = launcher.read_bytes()
+        try:
+            # Even a valid-looking token must not turn a failed process into success.
+            token = 'f'*32
+            launcher.write_text("import sys\nprint(%r)\nsys.stderr.write('PRIVATE_RUNTIME_DETAIL')\nraise SystemExit(2)\n" % token)
+            with opener.open(url, timeout=5) as response:
+                body = response.read()
+            value = json.loads(body)
+            self.assertEqual(value['bridge_revision'], 'php-runtime-2')
+            self.assertEqual(value['worker']['state'], 'worker_exit_failed')
+            self.assertEqual(value['worker']['exit_code'], 2)
+            self.assertTrue(value['worker']['stderr_present'])
+            for secret in (token.encode(), b'PRIVATE_RUNTIME_DETAIL', PASSWORD.encode(), str(self.live_root).encode()):
+                self.assertNotIn(secret, body)
+            self.assertFalse([p for p in (self.live_root/'jobs').iterdir() if p.is_dir()])
+        finally:
+            launcher.write_bytes(original)
+
+    def test_php_runtime_diagnostic_bounds_a_stalled_worker(self):
+        bridge, launcher = self.root/'live.php', self.live_root/'worker.py'
+        original_bridge, original_worker = bridge.read_text(), launcher.read_bytes()
+        try:
+            bridge.write_text(original_bridge.replace('microtime(true)+15.0', 'microtime(true)+0.1'))
+            launcher.write_text('import time\ntime.sleep(1)\n')
+            opener = self.logged_in()
+            with opener.open(self.url+'/segio/archive/live.php?action=diagnostic', timeout=5) as response:
+                value = json.load(response)
+            self.assertEqual(value['worker']['state'], 'timeout')
+        finally:
+            bridge.write_text(original_bridge)
+            launcher.write_bytes(original_worker)
+
+    def test_php_runtime_diagnostic_can_poll_windows_blocking_pipes(self):
+        bridge = self.root/'live.php'
+        original = bridge.read_text()
+        text = original.replace('$stdout_ready=@stream_set_blocking($pipes[1],false);', '$stdout_ready=false;')
+        text = text.replace('$stderr_ready=@stream_set_blocking($pipes[2],false);', '$stderr_ready=false;')
+        guard = "if (!$nonblocking && DIRECTORY_SEPARATOR!=='\\\\')"
+        self.assertIn(guard, text)
+        text = text.replace(guard, 'if (false)')
+        try:
+            bridge.write_text(text)
+            opener = self.logged_in()
+            with opener.open(self.url+'/segio/archive/live.php?action=diagnostic', timeout=5) as response:
+                value = json.load(response)
+            self.assertEqual(value['worker']['state'], 'ok')
+            self.assertEqual(value['worker']['exit_code'], 0)
+            self.assertEqual(value['worker']['output_bytes'], 33)
+        finally:
+            bridge.write_text(original)
+
     def test_native_php_without_random_sources_uses_worker_entropy_and_finishes_export(self):
         bridge=self.root/'live.php'
         original=bridge.read_bytes()

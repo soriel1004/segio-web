@@ -9,7 +9,7 @@ function answer($status, $value) {
     echo json_encode($value); exit;
 }
 function problem($status, $code) {
-    global $root, $action;
+    global $root, $action, $runtime_failure;
     // Start can fail before a job exists. Keep an anonymous fixed error too.
     // Do not call save_object here: a storage failure must not recurse.
     if (isset($root,$action) && $action==='start') {
@@ -18,6 +18,7 @@ function problem($status, $code) {
             $value=array('protocol'=>'segio-live-archive/1','phase'=>$code,
                 'diagnostic'=>array('stage'=>'server_request','category'=>'bridge','errno'=>null),
                 'failed_at'=>gmdate('Y-m-d\TH:i:s\Z'));
+            if (isset($runtime_failure)) $value['diagnostic']['runtime']=$runtime_failure;
             if (@file_put_contents($temporary,json_encode($value))!==false) {
                 @chmod($temporary,0600);
                 $target=$root.'/jobs/last-failure.json';
@@ -28,6 +29,73 @@ function problem($status, $code) {
         }
     }
     answer($status, array('protocol'=>'segio-live-archive/1','error'=>$code));
+}
+function public_worker_result($result) {
+    $public=array();
+    foreach(array('state','exit_code','output_bytes','stderr_present') as $name)
+        if (isset($result[$name])) $public[$name]=$result[$name];
+    return $public;
+}
+function run_fixed_worker($config, $root, $arguments, $require_token) {
+    $result=array('state'=>'process_unavailable','exit_code'=>null,
+                  'output_bytes'=>0,'stderr_present'=>false);
+    foreach(array('proc_open','proc_close','proc_get_status','proc_terminate',
+                  'stream_set_blocking','stream_get_contents','escapeshellarg','usleep') as $name)
+        if (!function_exists($name)) return $result;
+    $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']);
+    foreach($arguments as $argument) $command.=' '.escapeshellarg($argument);
+    $pipes=array();
+    $process=@proc_open($command,array(0=>array('pipe','r'),1=>array('pipe','w'),2=>array('pipe','w')),$pipes,$root);
+    if (!is_resource($process)) { $result['state']='spawn_failed'; return $result; }
+    fclose($pipes[0]);
+    $stdout_ready=@stream_set_blocking($pipes[1],false);
+    $stderr_ready=@stream_set_blocking($pipes[2],false);
+    $nonblocking=$stdout_ready && $stderr_ready;
+    // Windows PHP does not always support nonblocking anonymous pipes. Poll
+    // the child first there; read bounded output only after it has exited.
+    if (!$nonblocking && DIRECTORY_SEPARATOR!=='\\') {
+        @proc_terminate($process); fclose($pipes[1]); fclose($pipes[2]); proc_close($process);
+        $result['state']='pipe_setup_failed'; return $result;
+    }
+    $output=''; $exit=null; $finished=false; $deadline=microtime(true)+15.0;
+    do {
+        if ($nonblocking) {
+            $chunk=stream_get_contents($pipes[1],65-strlen($output));
+            if (is_string($chunk)) $output.=$chunk;
+            $error=stream_get_contents($pipes[2],4096);
+            if (is_string($error) && strlen($error)) $result['stderr_present']=true;
+        }
+        $status=proc_get_status($process);
+        if (is_array($status) && !$status['running']) {
+            // PHP <= 8.2 can consume the exit status here. Cache it before close.
+            $exit=$status['exitcode']; $finished=true; break;
+        }
+        if (strlen($output)>=65 || microtime(true)>=$deadline) break;
+        usleep(10000);
+    } while (true);
+    if (!$finished) @proc_terminate($process);
+    if (($finished || $nonblocking) && strlen($output)<65) {
+        $chunk=stream_get_contents($pipes[1],65-strlen($output));
+        if (is_string($chunk)) $output.=$chunk;
+    }
+    if ($finished || $nonblocking) {
+        $error=stream_get_contents($pipes[2],4096);
+        if (is_string($error) && strlen($error)) $result['stderr_present']=true;
+    }
+    fclose($pipes[1]); fclose($pipes[2]);
+    $closed=proc_close($process);
+    if ($exit===null || $exit<0) $exit=$closed;
+    $result['exit_code']=$exit;
+    $result['output_bytes']=strlen($output);
+    if (!$finished) $result['state']=strlen($output)>=65?'output_limit':'timeout';
+    elseif ($exit===-1) $result['state']='exit_status_unavailable';
+    elseif ($exit!==0) $result['state']='worker_exit_failed';
+    elseif ($require_token && !preg_match('/\A[0-9a-f]{32}\r?\n?\z/',$output)) $result['state']='invalid_token';
+    else {
+        $result['state']='ok';
+        if ($require_token) $result['token']=trim($output);
+    }
+    return $result;
 }
 function new_job_id($config, $root) {
     $bytes=false;
@@ -47,16 +115,13 @@ function new_job_id($config, $root) {
     if (is_string($bytes) && strlen($bytes)===16) return bin2hex($bytes);
     // Native SEGIO PHP may restrict /dev access and lack OpenSSL. Ask the
     // installed worker for OS entropy, using fixed arguments and no secrets.
-    $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']).' --random-token';
-    $pipes=array();
-    $process=@proc_open($command,array(0=>array('pipe','r'),1=>array('pipe','w'),2=>array('pipe','w')),$pipes,$root);
-    if (!is_resource($process)) problem(503,'secure_random_unavailable');
-    fclose($pipes[0]);
-    $token=stream_get_contents($pipes[1],65); fclose($pipes[1]);
-    stream_get_contents($pipes[2],4096); fclose($pipes[2]);
-    $exit=proc_close($process);
-    if ($exit!==0 || !preg_match('/\A[0-9a-f]{32}\r?\n?\z/',$token)) problem(503,'secure_random_unavailable');
-    return trim($token);
+    global $runtime_failure;
+    $result=run_fixed_worker($config,$root,array('--random-token'),true);
+    if ($result['state']!=='ok') {
+        $runtime_failure=public_worker_result($result);
+        problem(503,'secure_random_unavailable');
+    }
+    return $result['token'];
 }
 function object_file($path) {
     if (!is_file($path) || is_link($path) || filesize($path)>65536) return false;
@@ -105,12 +170,28 @@ if (!$config || !isset($config['csrf_secret'],$config['worker'],$config['python'
 }
 $method=isset($_SERVER['REQUEST_METHOD'])?$_SERVER['REQUEST_METHOD']:(isset($_ENV['REQUEST_METHOD'])?$_ENV['REQUEST_METHOD']:'');
 $action=isset($_GET['action'])?$_GET['action']:'info';
-if (!is_string($action) || !in_array($action,array('info','start','status','download','cleanup'),true)) problem(400,'unknown_action');
+if (!is_string($action) || !in_array($action,array('info','diagnostic','start','status','download','cleanup'),true)) problem(400,'unknown_action');
 foreach($_GET as $key=>$value) if ($key!=='action' && $key!=='job') problem(400,'unexpected_parameter');
 $post=($action==='start' || $action==='cleanup');
 if (($post && $method!=='POST') || (!$post && $method!=='GET' && $method!=='HEAD')) problem(405,'read_only');
 $hour=(int)floor(time()/3600);
 $csrf=hash_hmac('sha256',$uid.'|'.$hour,$config['csrf_secret']);
+if ($action==='diagnostic') {
+    $probe=run_fixed_worker($config,$root,array('--random-token'),true);
+    answer(200,array('protocol'=>'segio-live-archive/1','bridge_revision'=>'php-runtime-2',
+        'checks'=>array('proc_open'=>function_exists('proc_open'),
+            'proc_close'=>function_exists('proc_close'),
+            'proc_get_status'=>function_exists('proc_get_status'),
+            'proc_terminate'=>function_exists('proc_terminate'),
+            'stream_set_blocking'=>function_exists('stream_set_blocking'),
+            'stream_get_contents'=>function_exists('stream_get_contents'),
+            'escapeshellarg'=>function_exists('escapeshellarg'),
+            'php_path_restriction'=>(string)ini_get('open_basedir')!=='',
+            'php_safe_mode'=>in_array(strtolower((string)ini_get('safe_mode')),array('1','on','yes','true'),true),
+            'python_executable'=>@is_executable($config['python']),
+            'worker_readable'=>@is_readable($config['worker'])),
+        'worker'=>public_worker_result($probe)));
+}
 if ($action==='info') answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,
     'csrf'=>$csrf,'capabilities'=>array('live_db'=>true,'mbox'=>!empty($config['mail_template']))));
 if ($post) {
@@ -147,12 +228,9 @@ if ($action==='start') {
     save_object($job.'/request.json',array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time()));
     save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued','phase'=>'queued'));
     flock($gate,LOCK_UN); fclose($gate);
-    $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']).
-             ' --config '.escapeshellarg($root.'/config.json').' --job '.escapeshellarg($id).' --detach';
-    $null=DIRECTORY_SEPARATOR==='\\'?'NUL':'/dev/null';
-    $pipes=array();
-    $process=proc_open($command,array(0=>array('file',$null,'r'),1=>array('file',$null,'a'),2=>array('file',$null,'a')),$pipes,$root);
-    if (!is_resource($process) || proc_close($process)!==0) {
+    $started=run_fixed_worker($config,$root,array('--config',$root.'/config.json','--job',$id,'--detach'),false);
+    if ($started['state']!=='ok') {
+        $runtime_failure=public_worker_result($started);
         save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'failed','phase'=>'export_process_unavailable'));
         problem(503,'export_process_unavailable');
     }

@@ -1,5 +1,7 @@
 # 두 프로그램 공용 tools
 
+**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
+
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.3)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
 ## Windows 프로그램에 적용
@@ -39,3 +41,19 @@ python ./install_live_archive.py --web-user segio \
 - 두 결과는 서로 다른 Windows 저장 폴더에 두는 것이 구분하기 쉽습니다. 원본은 읽기만 하지만 각 방식은 독립된 시점에 추출하므로 다운로드 중 원본이 바뀌면 재시도가 필요합니다.
 
 기존 실행 파일은 재빌드하지 않아도 공용 `tools`를 읽습니다. 이번 공용 묶음 검증은 합성 자료로 수행하며, 운영 서버 인증·접근 권한·실제 자료 누락 여부는 현장에서 확인해야 합니다.
+
+## Python 진단은 정상인데 secure_random_unavailable이 계속될 때
+
+서버의 웹 계정에서 Python을 직접 실행하는 검사와 네이티브 PHP가 Python을 실행하는 검사는 다릅니다. 새 도구의 PHP 연결기는 프로세스 종료 코드를 읽은 뒤 보존하며, 출력을 제한하고 작업기 응답을 최대 15초 기다립니다. 종료 코드가 실패이거나 확인되지 않는 경우는 성공으로 처리하지 않습니다.
+
+서버 설치를 새 묶음으로 갱신한 뒤 수집을 다시 실행하세요. 계속 실패하면 **기존 SEGIO에 로그인한 브라우저**에서 로그인 주소와 같은 서버의 다음 경로를 엽니다.
+
+```text
+/segio/archive/live.php?action=diagnostic
+```
+
+예를 들어 사내 주소는 `http://192.168.0.100/segio/archive/live.php?action=diagnostic`입니다. 이 응답의 `bridge_revision`은 `php-runtime-2`여야 합니다. `unknown_action`이면 이전 PHP 연결기가 서비스 중이거나 갱신한 서버와 접속한 서버가 다른지 확인합니다.
+
+진단 응답은 함수 사용 가능 여부·접근 가능 여부·고정 상태·종료 코드·출력 길이만 담습니다. 암호·쿠키·작업 번호·설정 경로·작업기의 원문 출력은 반환하지 않으며 DB 조회나 직원 자료 수집을 시작하지 않습니다. 로그인하지 않은 요청은 거부합니다.
+
+`worker.state`가 `ok`이면 그 PHP 요청에서 Python 작업 번호 생성은 정상입니다. `process_unavailable`은 필요한 PHP 함수 제한, `spawn_failed`는 프로세스 생성 실패, `worker_exit_failed`는 Python 자식 프로세스 실패, `exit_status_unavailable`은 종료 상태 확인 불가, `timeout`은 응답 시간 초과를 뜻합니다. 해당 JSON을 기준으로 웹 서비스 설정과 Python 실행 환경을 추가 진단합니다.
