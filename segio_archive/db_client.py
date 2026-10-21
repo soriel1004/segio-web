@@ -268,6 +268,12 @@ class PreparedDBCollector(Collector):
     def cleanup_remote(self):
         pass
 
+    def after_verified_download(self, destination):
+        pass
+
+    def finish_remote_cleanup(self, destination):
+        pass
+
     def record_failure(self, exception):
         try:
             self.failure_path = write_failure(self.config.output,exception,self.phase)
@@ -344,6 +350,7 @@ class PreparedDBCollector(Collector):
                     manifest['local_processing'] = {'state':'pending'}
                     atomic_write(destination/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
                     archive.unlink()
+                    self.after_verified_download(destination)
                 self.checkpoint()
                 self.finalize_download(root, archive, destination)
             except Exception as exc:
@@ -389,13 +396,14 @@ class PreparedDBCollector(Collector):
                         prepared = '확인 필요'
                     self.log("본인 자료 확인 · 추출 기준 시각: " + prepared)
                     result = self.receive(record)
+                    self.finish_remote_cleanup(result)
                     self.log("다운로드와 파일 검증 완료: " + str(result))
                     return result
                 finally:
                     try:
                         self.cleanup_remote()
                     except Exception:
-                        self.log('서버 임시 작업 정리를 확인하지 못했습니다. 완성 자료는 서버에서 보존 기간에 따라 정리됩니다.')
+                        self.log('서버 임시 ZIP 삭제를 확인하지 못했습니다. 저장된 백업은 유지됩니다. 서버 정리 상태를 확인하세요.')
                     try:
                         self.browser.close()
                     except Exception:
@@ -421,6 +429,10 @@ class DBCollector(PreparedDBCollector):
         super().__init__(config, log)
         self.csrf = None
         self.job = None
+        self.cleanup_confirmed = False
+        self.cleanup_cancel_requested = False
+        self.cleanup_attempts = 0
+        self.cleanup_error_code = None
 
     def live_call(self, action, *, post=False, pending_login=False, timeout_ms=None, **fields):
         if action != 'cleanup':
@@ -500,6 +512,7 @@ class DBCollector(PreparedDBCollector):
             'invalid_job':'서버 추출 작업 번호가 올바르지 않습니다. [invalid_job]',
             'export_not_ready':'서버 추출 작업이 아직 완료되지 않았습니다. [export_not_ready]',
             'archive_unavailable':'완성된 서버 ZIP을 읽지 못했거나 크기가 달라졌습니다. [archive_unavailable]',
+            'cleanup_failed':'서버 임시 ZIP 또는 작업 폴더를 삭제하지 못했습니다. 서버 정리 상태를 확인하세요. [cleanup_failed]',
             'native_login_required':'SEGIO 직원 로그인을 확인하지 못했습니다. ID·암호와 서버 인증 연결을 확인하세요.',
             'mail_path_unconfigured':'서버의 직원별 메일 저장 경로가 설정되지 않았습니다.',
             'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
@@ -595,6 +608,10 @@ class DBCollector(PreparedDBCollector):
         if not re.fullmatch(r'[a-f0-9]{32}',str(job)):
             raise CollectionError('서버 작업 번호가 올바르지 않습니다.')
         self.job = job
+        self.cleanup_confirmed = False
+        self.cleanup_cancel_requested = False
+        self.cleanup_attempts = 0
+        self.cleanup_error_code = None
         previous = None
         deadline = time.monotonic()+72*3600
         while time.monotonic()<deadline:
@@ -644,6 +661,69 @@ class DBCollector(PreparedDBCollector):
         self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
         build_local_catalog(destination, self.config.username, self.checkpoint, self.log, self.progress)
 
-    def cleanup_remote(self):
-        if self.job and self.csrf:
-            self.live_call('cleanup',post=True)
+    def cleanup_remote(self, attempt_limit=3):
+        if self.cleanup_confirmed or self.cleanup_cancel_requested or not self.job or not self.csrf:
+            return
+        available = min(attempt_limit, 3-self.cleanup_attempts)
+        if available <= 0:
+            raise CollectionError('서버 임시 ZIP 삭제 요청을 세 번 시도했지만 확인하지 못했습니다.')
+        phase = self.phase
+        try:
+            for attempt in range(available):
+                self.cleanup_attempts += 1
+                try:
+                    # Extracting a large mailbox can outlive the hourly CSRF
+                    # window. Refresh identity and token without starting a job.
+                    info = self.live_call('info',timeout_ms=10000)
+                    token = info.get('csrf','')
+                    if not re.fullmatch(r'[a-f0-9]{64}',str(token)):
+                        raise CollectionError('서버 정리용 인증 정보를 확인하지 못했습니다.')
+                    self.csrf = token
+                    result = self.live_call('cleanup',post=True,timeout_ms=10000)
+                    if result.get('job')==self.job and result.get('state')=='cancellation_requested':
+                        self.cleanup_cancel_requested = True
+                        return
+                    if (result.get('job')!=self.job or result.get('state')!='cleaned' or
+                            result.get('archive_deleted') is not True or result.get('job_deleted') is not True):
+                        raise CollectionError('서버 임시 ZIP 삭제 확인을 받지 못했습니다. 서버 도구를 갱신하고 정리 상태를 확인하세요.')
+                    self.cleanup_confirmed = True
+                    self.cleanup_error_code = None
+                    self.log('서버 임시 ZIP과 이번 작업 폴더 삭제를 확인했습니다.')
+                    return
+                except Exception as exc:
+                    error = exc if isinstance(exc,CollectionError) else processing_error(exc,'서버 임시 ZIP 삭제 확인')
+                    matched = re.search(r'\[([A-Za-z0-9_]+)\]',str(error))
+                    allowed = {'cleanup_failed','csrf_required','BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON',
+                               'BRIDGE_LOGIN_REQUIRED','TIMEOUT','ERR_CONNECTION_RESET',
+                               'ERR_CONNECTION_CLOSED','BROWSER_CONNECTION_ERROR'}
+                    self.cleanup_error_code = matched[1] if matched and matched[1] in allowed else 'CLEANUP_UNCONFIRMED'
+                    if attempt==available-1:
+                        raise
+                    time.sleep(.25*(attempt+1))
+        finally:
+            self.phase = phase
+
+    def save_cleanup_status(self, destination):
+        from .archive import atomic_write
+        path = destination/'manifest.json'
+        manifest = json.loads(path.read_text(encoding='utf-8'))
+        manifest['server_cleanup'] = {'state':'deleted' if self.cleanup_confirmed else 'pending',
+                                      'archive_deleted':self.cleanup_confirmed}
+        if not self.cleanup_confirmed and self.cleanup_error_code:
+            manifest['server_cleanup']['error'] = self.cleanup_error_code
+        atomic_write(path,json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+
+    def after_verified_download(self, destination):
+        self.progress('cleanup')
+        try:
+            self.cleanup_remote(attempt_limit=1)
+        except Exception:
+            self.log('서버 임시 ZIP 삭제를 아직 확인하지 못했습니다. 로컬 처리 후 다시 확인합니다.')
+        self.save_cleanup_status(destination)
+
+    def finish_remote_cleanup(self, destination):
+        try:
+            self.cleanup_remote()
+        except Exception:
+            self.log('주의: PC 백업은 저장됐지만 서버 임시 ZIP 삭제는 확인되지 않았습니다.')
+        self.save_cleanup_status(destination)

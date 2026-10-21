@@ -45,6 +45,7 @@ class App(tk.Tk):
         self.progress_text = tk.StringVar(value='백업을 시작하면 단계별 처리량을 표시합니다.')
         self.progress_detail = ''
         self.started_at = None
+        self.elapsed_seconds = 0
         self.build()
         self.after(100, self.poll)
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -185,6 +186,10 @@ class App(tk.Tk):
                         if manifest["state"] == "failed":
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
                             messagebox.showerror("수집 실패", detail)
+                        elif manifest.get('server_cleanup',{}).get('state')=='pending':
+                            self.finish_progress('PC 백업 완료 · 서버 임시 ZIP 삭제 미확인', True)
+                            self.status.set('PC 백업 완료 · 서버 임시 ZIP 삭제 미확인 · '+str(value))
+                            messagebox.showwarning('서버 정리 확인','PC 백업은 저장됐지만 서버 임시 ZIP 삭제를 확인하지 못했습니다. 서버 정리 상태와 프로그램 로그를 확인하세요.\n저장 폴더: '+str(value))
                         else:
                             messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
                     else:
@@ -198,11 +203,13 @@ class App(tk.Tk):
 
     def refresh_progress_text(self):
         if self.started_at is not None:
-            seconds = int(time.monotonic() - self.started_at)
-            self.progress_text.set('%s · 경과 %02d:%02d:%02d' %
-                                   (self.progress_detail, seconds//3600, seconds//60%60, seconds%60))
+            self.elapsed_seconds = int(time.monotonic() - self.started_at)
             if not self.running:
                 self.started_at = None
+        if self.progress_detail:
+            seconds = self.elapsed_seconds
+            self.progress_text.set('%s · 경과 %02d:%02d:%02d' %
+                                   (self.progress_detail, seconds//3600, seconds//60%60, seconds%60))
 
     def finish_progress(self, detail, success):
         self.progress.stop()
@@ -215,6 +222,7 @@ class App(tk.Tk):
 
     def begin_progress(self, detail):
         self.started_at = time.monotonic()
+        self.elapsed_seconds = 0
         self.progress_detail = detail
         self.progress_text.set(detail)
         self.progress.stop()

@@ -8,6 +8,7 @@ LABELS = {
     'download': 'PC로 다운로드', 'verify': '압축 해제·원본 검증',
     'index': '메일 검색 색인 생성', 'render': '메일 본문·첨부 생성',
     'finalize': '백업 폴더 마무리',
+    'cleanup': '서버 임시 ZIP 삭제 확인',
 }
 
 

@@ -1,3 +1,3 @@
 """SEGIO archive collector. Never deletes accounts or server data."""
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"

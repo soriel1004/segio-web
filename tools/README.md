@@ -4,6 +4,27 @@
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
+## 백업 후 서버 임시 ZIP 삭제
+
+`verified-cleanup-1`은 개인 로그인 백업의 삭제 요청에서 실제 ZIP과 작업 폴더 삭제를 확인합니다. 실패하면 `cleanup_failed`를 반환하고 성공으로 응답하지 않습니다. 삭제 확인 응답이 사라져도 같은 직원이 같은 작업을 재요청할 수 있도록 비공개 확인 JSON을 남깁니다. 요청별 직원 인증·시간 제한 CSRF 검증은 유지합니다. 실행 중인 추출은 취소를 요청하며 삭제 완료로 응답하지 않습니다. 다른 직원의 작업과 서버 원본 결재·메일은 정리 요청으로 삭제하지 않습니다.
+
+Windows v0.5.7은 PC의 ZIP·내부 파일 검증 및 원본 보존 직후 새 토큰을 받아 서버 임시 자료를 삭제합니다. 메일 변환이 끝날 때까지 ZIP을 유지하지 않습니다. 삭제 확인 실패는 PC 백업을 유지하면서 경고하고 manifest에 미확인 상태를 기록합니다.
+
+진행 중인 백업이 끝난 뒤 root SSH에서 다음을 실행하고 각 Windows 프로그램도 v0.5.7로 갱신하세요. 검사·설치 결과에서 `Server cleanup revision: verified-cleanup-1.`을 확인합니다. 그룹웨어 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.5.7.zip \
+  -o "$TOOLS_DIR/segio-web-0.5.7.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.5.7.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.5.7/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+이미 남은 종료 작업은 생성 후 24시간이 지나면 다음 백업 시작 시 정리합니다. `ready`는 서버 추출 완료 상태이므로 기존 직원의 PC 다운로드 완료를 증명하지는 않습니다. 실행 중인 다른 작업을 일괄 삭제하지 마세요. 작은 `jobs/.작업번호.cleanup.json`에는 작업·직원·정리 상태만 있고 압축 자료·메일·암호는 없으며, 작업 폴더가 사라진 확인 기록도 같은 방식으로 만료 정리합니다. 시간에 맞춰 실행되는 cron 작업을 설치하는 것은 아닙니다. 공용 도구 갱신은 SSH 프로그램의 직접 전송·임시 작업 정리 규칙을 유지합니다.
+
 ## 메일 변경 자동 재시도·진행률
 
 `mail-retry-progress-1`은 개인 로그인 추출 중 메일 변경 시 변경된 파일만 최대 두 번 재복사합니다. 변경 없는 파일은 재사용하고 최종 원본 목록과 파일 정보를 다시 대조합니다. 새 파일·삭제·이름 변경도 반영하며, 계속 변경되면 완료로 처리하지 않습니다. 메일 정리·이동을 잠시 중단하거나 사용량이 적은 시간에 다시 시도하세요. 원본 메일·권한·인증 설정은 변경하지 않습니다.

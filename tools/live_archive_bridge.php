@@ -161,12 +161,25 @@ function same_token($a,$b) {
     return $difference===0;
 }
 function remove_job($path) {
-    foreach(scandir($path) as $name) {
+    if (!file_exists($path)) return true;
+    if (is_link($path) || !is_dir($path)) return false;
+    $names=@scandir($path);
+    if ($names===false) return false;
+    // Preserve ownership metadata until every payload file is gone, so a
+    // failed cleanup can be authenticated and retried.
+    $ordered=array();
+    foreach($names as $name) if ($name!=='.' && $name!=='..' && $name!=='request.json') $ordered[]=$name;
+    $ordered[]='request.json';
+    foreach($ordered as $name) {
         if ($name==='.' || $name==='..') continue;
         $file=$path.'/'.$name;
-        if (is_dir($file) && !is_link($file)) remove_job($file); else unlink($file);
+        if (is_dir($file) && !is_link($file)) {
+            if (!remove_job($file)) return false;
+        } elseif (file_exists($file) || is_link($file)) {
+            if (!@unlink($file)) return false;
+        }
     }
-    rmdir($path);
+    return @rmdir($path) && !file_exists($path);
 }
 if (in_array(strtolower((string)ini_get('register_globals')),array('1','on','yes','true'),true))
     problem(503,'insecure_php_configuration');
@@ -213,7 +226,8 @@ if ($action==='diagnostic') {
         'worker'=>public_worker_result($probe)));
 }
 if ($action==='info') answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,
-    'csrf'=>$csrf,'capabilities'=>array('live_db'=>true,'mbox'=>!empty($config['mail_template']))));
+    'csrf'=>$csrf,'cleanup_revision'=>'verified-cleanup-1',
+    'capabilities'=>array('live_db'=>true,'mbox'=>!empty($config['mail_template']))));
 if ($post) {
     foreach($_POST as $key=>$value) if (!in_array($key,array('csrf','approvals','mail'),true)) problem(400,'unexpected_parameter');
     $token=isset($_POST['csrf'])?$_POST['csrf']:'';
@@ -231,6 +245,12 @@ if ($action==='start') {
     if (!$gate || !flock($gate,LOCK_EX)) problem(503,'job_storage_failed');
     $active=0;
     foreach(scandir($jobs) as $id) {
+        if (preg_match('/\A\.[a-f0-9]{32}\.cleanup\.json\z/',$id)) {
+            $receipt=object_file($jobs.'/'.$id);
+            if ($receipt && isset($receipt['created_at']) && time()-$receipt['created_at']>86400 &&
+                    !file_exists($jobs.'/'.substr($id,1,32))) @unlink($jobs.'/'.$id);
+            continue;
+        }
         if (!preg_match('/\A[a-f0-9]{32}\z/',$id) || is_link($jobs.'/'.$id)) continue;
         $request=object_file($jobs.'/'.$id.'/request.json');
         $status=object_file($jobs.'/'.$id.'/status.json');
@@ -260,17 +280,36 @@ $id=isset($_GET['job'])?$_GET['job']:'';
 if (!is_string($id) || !preg_match('/\A[a-f0-9]{32}\z/',$id)) problem(400,'invalid_job');
 $job=$jobs.'/'.$id;
 if (is_link($job)) problem(404,'job_not_found');
+$receipt_path=$jobs.'/.'.$id.'.cleanup.json';
+$receipt=object_file($receipt_path);
 $request=object_file($job.'/request.json');
-if (!$request || $request['username']!==$uid) problem(404,'job_not_found');
+if ($request && $request['username']!==$uid) problem(404,'job_not_found');
+if (!$request) {
+    if ($action!=='cleanup' || !$receipt || $receipt['username']!==$uid || $receipt['job']!==$id)
+        problem(404,'job_not_found');
+}
 $status=object_file($job.'/status.json');
 if ($action==='status') {
     if (!$status) problem(503,'job_status_unavailable');
     answer(200,$status);
 }
 if ($action==='cleanup') {
-    if ($status && ($status['state']==='ready' || $status['state']==='failed')) remove_job($job);
-    else file_put_contents($job.'/cancel','cancel');
-    answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'state'=>'cleaned'));
+    @set_time_limit(0);
+    if (($status && ($status['state']==='ready' || $status['state']==='failed')) ||
+            ($receipt && $receipt['username']===$uid && $receipt['job']===$id)) {
+        // Receipt supports safe retries when the response is lost after
+        // deletion. It contains no archive, mail, password or session token.
+        save_object($receipt_path,array('protocol'=>'segio-live-archive/1','username'=>$uid,
+            'job'=>$id,'created_at'=>time(),'state'=>'cleanup_requested'));
+        if (!remove_job($job) || file_exists($job) || is_link($job)) problem(503,'cleanup_failed');
+        save_object($receipt_path,array('protocol'=>'segio-live-archive/1','username'=>$uid,
+            'job'=>$id,'created_at'=>time(),'state'=>'cleaned'));
+        answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,
+            'state'=>'cleaned','archive_deleted'=>true,'job_deleted'=>true));
+    }
+    if (@file_put_contents($job.'/cancel','cancel')===false) problem(503,'cleanup_failed');
+    answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,
+        'state'=>'cancellation_requested','archive_deleted'=>false,'job_deleted'=>false));
 }
 if (!$status || $status['state']!=='ready') problem(409,'export_not_ready');
 $file=$job.'/archive.zip';

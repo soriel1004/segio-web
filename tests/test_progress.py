@@ -135,6 +135,16 @@ class ProgressWindowTests(unittest.TestCase):
                     app.poll()
                 self.assertEqual(float(app.progress.cget('value')),100)
                 self.assertIn('백업 완료',app.progress_text.get())
+                (root/'manifest.json').write_text(json.dumps({'state':'collected','warnings':[],
+                    'server_cleanup':{'state':'pending','archive_deleted':False}}))
+                app.running=True
+                app.begin_progress('서버 정리 확인')
+                with patch('segio_archive.gui.messagebox.showwarning') as warning:
+                    app.events.put(('done',root))
+                    app.poll()
+                warning.assert_called_once()
+                self.assertIn('삭제 미확인',app.status.get())
+                self.assertIn('삭제 미확인',app.progress_text.get())
         finally:
             app.running=False
             app.close()
