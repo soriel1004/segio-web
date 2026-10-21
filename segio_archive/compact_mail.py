@@ -6,6 +6,7 @@ from email.parser import BytesHeaderParser, BytesParser
 import hashlib
 import html
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -141,23 +142,43 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint)
 
 
-def search(root: Path, query='', kind='', page=0):
+def search(root: Path, query='', kind='', page=0, mailbox='', category=''):
+    from .mail_folders import MailFolders
+    from .index_metadata import IndexMetadata, CATEGORIES, header_date
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
-    where = r"(title LIKE ? ESCAPE '\' OR body LIKE ? ESCAPE '\' OR folders LIKE ? ESCAPE '\')"
-    parameters = [pattern, pattern, pattern]
-    if kind in ('mail', 'approval'):
-        where += ' AND kind=?'
-        parameters.append(kind)
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
-        total = db.execute('SELECT count(*) FROM items WHERE '+where, parameters).fetchone()[0]
-        rows = db.execute('SELECT id,kind,title,folders,html FROM items WHERE '+where+
-                          ' ORDER BY rowid LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
-    items=[dict(zip(('id','kind','title','folder','html'), row)) for row in rows]
+        MailFolders(root).register(db)
+        meta = IndexMetadata(root,db)
+        folder_label="CASE WHEN i.kind='mail' THEN mailbox_label(i.folders) ELSE approval_label("+meta.payload_sql+") END"
+        where = r"(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR i.folders LIKE ? ESCAPE '\' OR "+folder_label+r" LIKE ? ESCAPE '\')"
+        parameters = [pattern]*4
+        if kind in ('mail', 'approval'):
+            where += ' AND i.kind=?'
+            parameters.append(kind)
+        if mailbox and kind!='approval':
+            where+=" AND i.kind='mail' AND mailbox_key(i.folders)=?"
+            parameters.append(mailbox)
+        if category and kind!='mail':
+            where += " AND i.kind='approval' AND approval_has("+meta.payload_sql+",?)=1"
+            parameters.append(category)
+        origin = ' FROM items i '+meta.joins+' WHERE '+where
+        total = db.execute('SELECT count(*)'+origin, parameters).fetchone()[0]
+        fields = 'i.id,i.kind,i.title,'+folder_label+",i.html,CASE WHEN i.kind='mail' THEN mailbox_key(i.folders) ELSE '' END,i.folders,"
+        rows = db.execute('SELECT '+fields+meta.date_sql+','+meta.payload_sql+origin+
+                          ' ORDER BY '+meta.order+' LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
+    items=[]
     from .portable_mail import page_path
-    for item in items:
-        if item['kind']=='mail' and (root/page_path(item['id'])).is_file():
+    for row in rows:
+        item=dict(zip(('id','kind','title','folder','html','folder_id','source_folder'),row[:7]))
+        item['date']=header_date(row[7])[0] if item['kind']=='mail' else ''
+        item['date_raw']=row[7] if item['kind']=='mail' else ''
+        item['categories']=meta.categories(row[8]) if item['kind']=='approval' else []
+        if item['kind']=='approval':
+            item['folder']=' · '.join(CATEGORIES[key] for key in item['categories'])
+        if item['kind']=='mail' and re.fullmatch(r'mail-[0-9]{9}',item['id']) and (root/page_path(item['id'])).is_file():
             item['html']=page_path(item['id'])
+        items.append(item)
     return {'total':total,'items':items}
 
 

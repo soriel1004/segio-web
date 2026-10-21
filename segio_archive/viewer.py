@@ -18,7 +18,9 @@ class Viewer:
         if not (self.folder / "index.html").is_file():
             raise ValueError("보관함 index.html이 없습니다.")
         try:
-            self.compact = json.loads((self.folder/'manifest.json').read_text(encoding='utf-8')).get('viewer') == 'sqlite-mail/1'
+            manifest = json.loads((self.folder/'manifest.json').read_text(encoding='utf-8'))
+            self.compact = (manifest.get('viewer') in ('sqlite-mail/1','local-db/1') or
+                            manifest.get('format')=='segio-db-html/1' and (self.folder/'catalog.sqlite3').is_file())
         except (OSError, ValueError):
             self.compact = False
         if self.compact:
@@ -50,7 +52,7 @@ class Viewer:
                     try:
                         fields = parse_qs(urlsplit(self.path).query)
                         data = search(owner.folder, fields.get('q',[''])[0], fields.get('kind',[''])[0],
-                                      int(fields.get('page',['0'])[0]))
+                                      int(fields.get('page',['0'])[0]),fields.get('mailbox',[''])[0],fields.get('category',[''])[0])
                         return self.payload(json.dumps(data,ensure_ascii=False).encode('utf-8'), 'application/json', head)
                     except Exception:
                         return self.send_error(400)

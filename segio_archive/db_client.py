@@ -184,6 +184,8 @@ def publish_local(staging, archive, output, username):
 
 
 class PreparedDBCollector(Collector):
+    keep_zip = True
+
     def __init__(self, config: Config, log=lambda _: None):
         super().__init__(config, log)
         self.phase = '시작'
@@ -271,7 +273,7 @@ class PreparedDBCollector(Collector):
             unpack_verified(archive, destination, self.config.username, self.checkpoint)
             self.checkpoint()
             self.finalize_download(root, archive, destination)
-            return publish_local(destination, archive, output, self.config.username)
+            return publish_local(destination, archive if self.keep_zip else None, output, self.config.username)
 
     def run(self, password: str) -> Path:
         from playwright.sync_api import sync_playwright
@@ -326,6 +328,8 @@ class PreparedDBCollector(Collector):
 
 class DBCollector(PreparedDBCollector):
     """Fresh employee-scoped DB query and original server mailbox transfer."""
+    keep_zip = False
+
     def __init__(self, config, log=lambda _: None):
         super().__init__(config, log)
         self.csrf = None
@@ -514,17 +518,6 @@ class DBCollector(PreparedDBCollector):
         self.phase = 'Windows DB·메일 검색 색인 생성'
         self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
         build_local_catalog(destination, self.config.username, self.checkpoint)
-        indexed = root/'indexed.zip'
-        with zipfile.ZipFile(indexed,'w',zipfile.ZIP_DEFLATED,allowZip64=True) as zipped:
-            for path in destination.rglob('*'):
-                if not path.is_file():
-                    continue
-                self.checkpoint()
-                with path.open('rb') as incoming, zipped.open(path.relative_to(destination).as_posix(),'w',force_zip64=True) as outgoing:
-                    while block := incoming.read(1024*1024):
-                        self.checkpoint()
-                        outgoing.write(block)
-        os.replace(indexed,archive)
 
     def cleanup_remote(self):
         if self.job and self.csrf:

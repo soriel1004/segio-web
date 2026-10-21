@@ -46,7 +46,7 @@ class App(tk.Tk):
         self.mail = tk.BooleanVar(value=True)
         self.pdf = tk.BooleanVar(value=False)
         self.method = tk.StringVar(value=DB_MODE)
-        self.http = tk.BooleanVar(value=False)
+        self.http = tk.BooleanVar(value=True)
         self.manual = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
         self.build()

@@ -101,6 +101,8 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertTrue(app.approvals.get())
                 self.assertTrue(app.mail.get())
                 self.assertFalse(app.pdf.get())
+                self.assertTrue(app.http.get())
+                self.assertFalse(app.manual.get())
                 self.assertTrue(app.web_form.winfo_ismapped())
                 self.assertFalse(app.ssh_form.winfo_ismapped())
                 app.method.set(SSH_MODE)

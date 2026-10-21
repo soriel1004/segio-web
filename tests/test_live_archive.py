@@ -71,6 +71,31 @@ raise SystemExit(worker.main())
 
 
 class LiveWorkerTests(unittest.TestCase):
+    def test_personal_index_stores_original_date_header_instead_of_backup_date(self):
+        from segio_archive.compact_mail import search
+        from segio_archive.db_client import unpack_verified
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            create_fixture(root)
+            mailbox=root/'home/e/employee/mbox/inbox.mbox'
+            original=mailbox.read_bytes().replace(b'Subject:',b'Date: Tue, 01 Jan 2002 10:30:00 +0900\nSubject:',1)
+            mailbox.write_bytes(original)
+            job=root/'jobs'/('e'*32)
+            job.mkdir()
+            worker.write_json(str(job/'request.json'),{'username':'employee','approvals':True,'mail':True,'created_at':1})
+            with patch.object(worker,'run_export',side_effect=synthetic_export):
+                worker.run_job(str(root/'config.json'),'e'*32)
+            self.assertEqual(worker.read_json(str(job/'status.json'))['state'],'ready')
+            result=root/'result'
+            result.mkdir()
+            unpack_verified(job/'archive.zip',result,'employee')
+            build_local_catalog(result,'employee')
+            items=search(result,kind='mail')['items']
+            self.assertEqual(items[0]['date'],'2002-01-01 10:30 +0900')
+            self.assertEqual(items[0]['date_raw'],'Tue, 01 Jan 2002 10:30:00 +0900')
+            self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),original)
+            self.assertTrue(verify_archive(result)['ok'])
+
     def test_control_random_response_keeps_plain_cli_compatible_and_requires_os_entropy(self):
         import subprocess
         responses = [json.loads(subprocess.check_output([sys.executable,
@@ -321,6 +346,24 @@ class LiveInstallationTests(unittest.TestCase):
 @unittest.skipUnless(PHP,'PHP CLI required')
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
+
+    def test_personal_download_keeps_folder_and_never_repackages_a_local_zip(self):
+        import zipfile
+        original_zip = zipfile.ZipFile
+        def read_only_zip(path, mode='r', *args, **kwargs):
+            self.assertEqual(mode,'r','Personal downloads must not create an additional local ZIP')
+            return original_zip(path, mode, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(self.url+'/', 'employee', Path(tmp), mail=True, pdf=False,
+                allow_http=True, headless=True, timeout_ms=10000,
+                browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            with patch('segio_archive.db_client.zipfile.ZipFile',side_effect=read_only_zip):
+                result=DBCollector(config).run(PASSWORD)
+            self.assertTrue(verify_archive(result)['ok'])
+            self.assertTrue((result/'index.html').is_file())
+            self.assertEqual(list(Path(tmp).glob('*.zip')),[])
+            self.assertFalse(list(Path(tmp).glob('.segio-download-*')))
+            self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),self.original)
 
     def unavailable_child_status(self, text):
         text = text.replace('proc_get_status($process)', 'test_unavailable_status($process)')
@@ -748,8 +791,11 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                     context.on('request',lambda request:requests.append(request.url))
                     page=context.new_page()
                     page.goto(viewer.url)
+                    page.locator('#tab-mail').click()
                     page.locator('#q').fill('회의')
-                    self.assertEqual(page.locator('article').count(),1)
+                    page.locator('#search-button').click()
+                    from playwright.sync_api import expect
+                    expect(page.locator('article')).to_have_count(1)
                     self.assertIn('회의',page.locator('article h2').inner_text())
                     self.assertTrue(all(url.startswith(viewer.url.rsplit('/',1)[0]) for url in requests))
                     browser.close()

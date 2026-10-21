@@ -300,6 +300,9 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None):
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
     manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('viewer')=='local-db/1' or (manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1' and (root/'catalog.sqlite3').is_file()):
+        from .search_page import install_search_page
+        return install_search_page(root,checkpoint=checkpoint)
     if manifest.get('viewer')!='sqlite-mail/1':
         return manifest
     expected=manifest['files'].get('index.html')

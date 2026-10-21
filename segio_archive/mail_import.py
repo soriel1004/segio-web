@@ -14,7 +14,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from .archive import INDEX, safe_name
+from .archive import safe_name
 from .web import CollectionError
 
 PARSE_LIMIT = 32 * 1024 * 1024
@@ -79,7 +79,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
             raise CollectionError('메일 원본 경로 또는 검증 정보가 일치하지 않습니다.')
     raw_bytes = sum(source['bytes'] for source in sources['sources'])
     if shutil.disk_usage(root).free < raw_bytes * 2 + 64*1024*1024:
-        raise CollectionError('메일 색인과 최종 ZIP을 만들 저장 공간이 부족합니다.')
+        raise CollectionError('메일 본문과 첨부 색인을 만들 저장 공간이 부족합니다.')
     issues = []
     mail_count = 0
 
@@ -137,7 +137,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
         path = f'{directory}/document.html'
         write(path, body)
         items.append({'id': identity, 'kind': 'mail', 'title': title, 'folders': [source['name']],
-                      'body': '\n'.join((sender, receiver, date, text)), 'html': path, 'pdf': '',
+                      'body': '\n'.join((sender, receiver, date, text)), 'date': date, 'html': path, 'pdf': '',
                       'eml': source['path'] if source['format']=='rfc822' else '',
                       'mbox': source['path'] if source['format']=='mbox' else '',
                       'attachments': attachments, 'captured_at': manifest['finished_at'], 'status': 'raw_preserved'})
@@ -198,9 +198,12 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
         with connection:
             connection.execute('CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, folders TEXT, body TEXT, html TEXT)')
             connection.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
+            connection.execute('CREATE TABLE mail_dates (id TEXT PRIMARY KEY, header_date TEXT)')
             for item in items:
                 checkpoint()
                 connection.execute('INSERT INTO items VALUES (?,?,?,?,?,?)', (item['id'],item['kind'],item['title'],json.dumps(item['folders'],ensure_ascii=False),item['body'],item['html']))
+                if item['kind']=='mail':
+                    connection.execute('INSERT INTO mail_dates VALUES (?,?)',(item['id'],item.get('date','')))
                 if item['kind']=='approval':
                     connection.execute('INSERT INTO document_records VALUES (?,?)', (item['id'],local(item['json']).read_text(encoding='utf-8')))
     finally:
@@ -213,7 +216,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
             digest.update(block)
     files['catalog.sqlite3'] = {'bytes':size,'sha256':digest.hexdigest()}
     write('catalog.json', json.dumps({'items':items}, ensure_ascii=False))
-    payload = json.dumps({'items':items,'manifest':manifest}, ensure_ascii=False).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
-    write('index.html', INDEX.replace('__DATA__',payload))
+    manifest['viewer']='local-db/1'
     (root/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2), encoding='utf-8')
-    return manifest
+    from .search_page import install_search_page
+    return install_search_page(root,manifest,checkpoint)
