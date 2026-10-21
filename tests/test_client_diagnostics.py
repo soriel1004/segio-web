@@ -92,5 +92,25 @@ class ClientDiagnosticTests(unittest.TestCase):
             self.assertNotIn('PRIVATE',path.read_text())
             self.assertNotIn('SECRET',path.read_text())
 
+    def test_service_config_error_retains_only_safe_checks_and_exact_error_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client=self.client(Path(tmp))
+            checks={'config_exists':False,'config_readable':False,'config_json_object':False,
+                    'php_path_restriction':True,'php_safe_mode':False,
+                    'password':'PRIVATE_PASSWORD','config_path':'PRIVATE_PATH'}
+            body={'protocol':'segio-live-archive/1','error':'service_not_configured','checks':checks,
+                  'secret':'PRIVATE_RESPONSE'}
+            client.context.request.get.return_value=response(503,'application/json',json.dumps(body).encode())
+            with self.assertRaisesRegex(BridgeResponseError,'설치 경로.*service_not_configured') as caught:
+                client.live_call('info')
+            client.record_failure(caught.exception)
+            text=(Path(tmp)/'last-client-failure.json').read_text()
+            record=json.loads(text)
+            self.assertEqual(record['error'],'service_not_configured')
+            self.assertEqual(record['response']['http_status'],503)
+            self.assertEqual(record['server_checks'],{key:value for key,value in checks.items() if type(value) is bool})
+            self.assertNotIn('PRIVATE',text)
+            self.assertNotIn('password',text)
+
 
 if __name__=='__main__':unittest.main()

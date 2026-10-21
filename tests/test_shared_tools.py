@@ -37,6 +37,27 @@ class SharedBundleTests(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == 'win32', 'POSIX server installation')
 class SharedInstallationTests(unittest.TestCase):
+    def test_missing_private_tree_is_reinstalled_when_known_endpoint_remains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            cell,private=self.fixture(root)
+            original_db=(cell/'etc/db.conf').read_bytes()
+            mail=cell/'home/e/employee/mbox/inbox.mbox'
+            mail.parent.mkdir(parents=True)
+            mail.write_bytes(b'ORIGINAL_MAIL_MUST_STAY')
+            self.install(cell,private)
+            endpoint=cell/'folder/html/segio/archive/live.php'
+            shutil.rmtree(private)
+            self.assertTrue(endpoint.is_file())
+            self.install(cell,private)
+            config=json.loads((private/'config.json').read_text())
+            self.assertEqual(config['root'],str(private))
+            self.assertTrue((private/'code/diagnose_live_archive.py').is_file())
+            self.assertTrue((private/'code/live_export_worker.py').is_file())
+            self.assertEqual(list((private/'jobs').iterdir()),[])
+            self.assertEqual((cell/'etc/db.conf').read_bytes(),original_db)
+            self.assertEqual(mail.read_bytes(),b'ORIGINAL_MAIL_MUST_STAY')
+
     def install(self, cell, root, template=None, tools=None):
         import install_live_archive as installer
         account = types.SimpleNamespace(pw_uid=1234, pw_gid=os.getgid())

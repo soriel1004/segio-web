@@ -1,5 +1,9 @@
 @echo off
 setlocal
+if /i not "%~1"=="--minimized" (
+  start "SEGIO Archive" /min "%ComSpec%" /d /s /c ""%~f0" --minimized"
+  exit /b 0
+)
 cd /d "%~dp0"
 if not defined PLAYWRIGHT_BROWSERS_PATH (
   if defined LOCALAPPDATA (

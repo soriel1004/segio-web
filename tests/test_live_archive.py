@@ -355,6 +355,26 @@ class LiveInstallationTests(unittest.TestCase):
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
 
+    @unittest.skipUnless(os.environ.get('DISPLAY') or sys.platform=='win32','Headed browser display required')
+    def test_minimize_requests_keep_automatic_and_manual_employee_login_working(self):
+        from segio_archive.window_control import minimize_browser_windows
+        for manual in (False,True):
+            with self.subTest(manual=manual),tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                    allow_http=True,headless=False,manual_login=manual,minimize_browser=True,
+                    timeout_ms=10000,browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                def log(message):
+                    if manual and '열린 브라우저에서 로그인하세요' in message:
+                        client.page.locator('[name=uid]').fill('employee')
+                        client.page.locator('[name=password]').fill(PASSWORD)
+                        client.page.locator('button').click()
+                client=DBCollector(config,log)
+                with patch('segio_archive.window_control.minimize_browser_windows',wraps=minimize_browser_windows) as minimizer:
+                    result=client.run('' if manual else PASSWORD)
+                self.assertEqual(minimizer.call_count,1 if manual else 2)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertTrue(client.cleanup_confirmed)
+
     def test_personal_download_keeps_folder_and_never_repackages_a_local_zip(self):
         import zipfile
         original_zip = zipfile.ZipFile

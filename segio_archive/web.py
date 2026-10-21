@@ -84,6 +84,7 @@ class Config:
     browser_executable: str | None = None
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     progress: object = field(default=None, repr=False, compare=False)
+    minimize_browser: bool = False
 
     def validate(self):
         self.server = html.unescape(self.server.strip().replace("\\&", "&"))

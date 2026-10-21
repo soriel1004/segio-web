@@ -49,6 +49,8 @@ class App(tk.Tk):
         self.build()
         self.after(100, self.poll)
         self.protocol("WM_DELETE_WINDOW", self.close)
+        from .window_control import minimize_console
+        self.after_idle(minimize_console)
 
     def build(self):
         panel = ttk.Frame(self, padding=24)
@@ -122,6 +124,7 @@ class App(tk.Tk):
                             mail=self.mail.get(), pdf=False, allow_http=self.http.get(),
                             manual_login=self.manual.get(), cancel=self.cancel_event)
             config.progress = lambda event:self.events.put(('progress',event))
+            config.minimize_browser = True
             password = self.password.get()
             if not password and not config.manual_login:
                 raise ValueError("그룹웨어 암호를 입력하거나 브라우저 직접 로그인을 선택하세요.")

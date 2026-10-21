@@ -1,14 +1,22 @@
-# 개인 SEGIO 로그인으로 자료 받기 · v0.5.7
+# 개인 SEGIO 로그인으로 자료 받기 · v0.5.8
 
-개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.7 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.7.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.7**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.8 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.8.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.8**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
 
-프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.7.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
+프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.8.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
 
 첫 화면은 **결재 문서·메일·암호화되지 않은 HTTP 연결 허용**만 기본 선택합니다. HTTPS 주소에서는 인증서 검증을 유지합니다. 개인 로그인 방식은 [서버 연결 기능](docs/WINDOWS_LOGIN.md)이 설치되어 있어야 하며, 서버에는 전송·검증용 임시 ZIP이 필요합니다. 내려받은 뒤 다시 ZIP을 만들거나 최종 ZIP을 추가 저장하지 않고 **백업 폴더만** 남깁니다. SSH 방식의 추가 ZIP도 기본 해제입니다.
 
 첫 화면은 **개인 SEGIO 로그인으로 자료 받기** 전용이며 가져오기 방식 목록을 표시하지 않습니다. 기본 서버는 `lssgroup.co.kr`의 기존 로그인 경로이고, 계정 입력 이름은 **그룹웨어 ID·그룹웨어 암호**입니다.
 
-서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.7 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.8 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+
+## 실행 창 최소화·서버 설정 오류 확인
+
+v0.5.8은 백업 프로그램의 메인 창을 표시하고, `run_windows.bat`의 커맨드 창을 작업표시줄로 최소화합니다. 자동 로그인용 웹 창도 실행 직후 최소화하고 로그인 후 다시 적용합니다. ‘열린 브라우저에서 직접 로그인’을 선택했다면 입력할 수 있도록 로그인 창을 표시하며, 본인 인증 확인 후 최소화합니다. 최소화한 창은 작업표시줄에서 다시 열 수 있습니다. 개인 브라우저 창이나 프로필을 찾아 조작하지 않고 프로그램이 연 브라우저 창만 대상으로 합니다. 창 최소화에 실패해도 수집은 계속합니다. 설치·실행 오류로 커맨드 창이 대기 중이면 작업표시줄에서 열어 오류를 확인하세요.
+
+`service_not_configured`는 직원 로그인 뒤 서버 추출 설정을 확인하지 못했다는 뜻입니다. v0.5.8의 `last-client-failure.json`에는 이 코드와 HTTP 상태·허용된 `server_checks` 참/거짓 값만 저장해 파일 존재·읽기·JSON 해석·PHP 제한 여부를 구분합니다. 설정 경로·설정값·암호·응답 원문은 기록하지 않습니다.
+
+이번 운영 확인에서는 웹 `live.php`가 참조하는 `/home/segio/cell000/etc/segio-live-archive` 폴더 전체가 없는 상태였습니다. 사용자가 v0.5.7 서버 묶음으로 재설치를 완료했습니다. 폴더가 없어진 원인을 확정한 것은 아닙니다. v0.5.8의 공용 서버 도구는 v0.5.7과 동일하므로 이 재설치가 끝났다면 Windows 프로그램만 갱신합니다. 같은 증상이 반복되면 새 익명 오류 JSON과 실제 설치 경로를 확인하며, 서버의 config.json 원문을 전달하지 마세요.
 
 ## 백업 후 서버 임시 ZIP 삭제
 

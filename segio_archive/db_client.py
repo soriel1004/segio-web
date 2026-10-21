@@ -25,7 +25,7 @@ from urllib.parse import urlencode, urljoin
 from .browser import BrowserUnavailable, launch_browser
 from .archive import safe_name
 from .web import Collector, CollectionError, Config, origin
-from .client_diagnostics import BridgeResponseError, response_summary, write_failure
+from .client_diagnostics import BridgeResponseError, ServiceConfigurationError, response_summary, write_failure
 from .progress import ProgressReporter
 from .file_ops import file_diagnostic
 
@@ -373,12 +373,16 @@ class PreparedDBCollector(Collector):
                 self.phase = '브라우저 시작'
                 self.progress('login')
                 self.browser = launch_browser(p.chromium, headless=self.config.headless,
-                                              explicit=self.config.browser_executable, log=self.log)
+                                              explicit=self.config.browser_executable, log=self.log,
+                                              minimize=self.config.minimize_browser and not self.config.manual_login)
                 try:
                     self.context = self.browser.new_context(accept_downloads=False, service_workers='block')
                     self.context.set_default_timeout(self.config.timeout_ms)
                     self.context.route('**/*', self.guard)
                     self.page = self.context.new_page()
+                    if self.config.minimize_browser and not self.config.manual_login and not self.config.headless:
+                        from .window_control import minimize_browser_windows
+                        minimize_browser_windows(self.context,self.log)
                     self.user_agent = self.page.evaluate('navigator.userAgent')
                     self.phase = 'SEGIO 로그인'
                     self.log("직원 SEGIO ID·암호로 로그인 확인 중")
@@ -386,6 +390,9 @@ class PreparedDBCollector(Collector):
                     # proof for this mode; approval-menu HTML is not required.
                     self.login(password, probe=False)
                     password = ''
+                    if self.config.minimize_browser and not self.config.headless:
+                        from .window_control import minimize_browser_windows
+                        minimize_browser_windows(self.context,self.log)
                     self.checkpoint()
                     self.phase = '서버 연결 기능 확인'
                     record = self.info()
@@ -481,6 +488,8 @@ class DBCollector(PreparedDBCollector):
                 raise BridgeResponseError('서버 연결 기능이 올바른 JSON을 반환하지 않았습니다. PHP 오류와 설정 파일 접근 상태를 확인하세요.',
                                           'BRIDGE_INVALID_JSON',diagnostic) from None
             if isinstance(value,dict) and value.get('protocol')==LIVE_PROTOCOL and value.get('error'):
+                if value['error']=='service_not_configured':
+                    raise ServiceConfigurationError(diagnostic,value.get('checks'))
                 if pending_login and value['error']=='native_login_required':
                     return None
                 raise CollectionError(self.error_message(value['error']))

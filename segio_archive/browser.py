@@ -74,7 +74,7 @@ def browser_candidates(bundled_path: str, explicit: str | None = None,
     return result
 
 
-def launch_browser(chromium, *, headless: bool, explicit: str | None = None, log=lambda _: None):
+def launch_browser(chromium, *, headless: bool, explicit: str | None = None, log=lambda _: None, minimize=False):
     candidates = browser_candidates(chromium.executable_path, explicit)
     if not candidates:
         raise BrowserUnavailable(
@@ -82,7 +82,10 @@ def launch_browser(chromium, *, headless: bool, explicit: str | None = None, log
             "다시 수집하세요. 전용 Chromium은 install_browser_windows.bat으로 선택 설치할 수 있습니다.")
     for choice in candidates:
         try:
-            browser = chromium.launch(headless=headless, executable_path=choice.executable)
+            options = {'headless':headless, 'executable_path':choice.executable}
+            if minimize and not headless:
+                options['args'] = ['--start-minimized']
+            browser = chromium.launch(**options)
             log(f"{choice.label} 사용 · 개인 브라우저 프로필과 분리된 창을 엽니다.")
             return browser
         except Exception:

@@ -17,6 +17,7 @@ PHASES = {'시작','브라우저 시작','SEGIO 로그인','서버 연결 기능
           '서버 추출 요청','서버 추출 상태 확인','서버 연결','다운로드 저장 폴더 준비',
           '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성'}
 ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARGE',
+               'service_not_configured',
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
                'LOGIN_ORIGIN_MISMATCH','LOGIN_NOT_CONFIRMED','BRIDGE_REDIRECT',
                'TIMEOUT','LOGIN_FRAME_TRANSITION','BROWSER_CONNECTION_ERROR',
@@ -27,6 +28,8 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'ERR_NAME_NOT_RESOLVED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID',
                'ERR_SSL_PROTOCOL_ERROR','ERR_SSL_VERSION_OR_CIPHER_MISMATCH','ERR_FAILED',
                'ECONNREFUSED','ECONNRESET','ENOTFOUND','CERT_HAS_EXPIRED'}
+SERVICE_CHECKS = {'config_exists','config_readable','config_json_object',
+                  'php_path_restriction','php_safe_mode'}
 
 
 def response_summary(action, status, content_type, body=b''):
@@ -62,6 +65,21 @@ class BridgeResponseError(CollectionError):
                          (message,action,diagnostic['http_status'],diagnostic['content_type'],code))
 
 
+class ServiceConfigurationError(BridgeResponseError):
+    def __init__(self, diagnostic, checks):
+        self.server_checks = {key:value for key,value in checks.items()
+                              if key in SERVICE_CHECKS and type(value) is bool} if isinstance(checks,dict) else {}
+        if self.server_checks.get('config_exists') is False:
+            hint = '서버 설정 파일을 확인하지 못했습니다. 설치 경로·파일 누락과 PHP 접근 제한을 확인하세요.'
+        elif self.server_checks.get('config_readable') is False:
+            hint = '서버 PHP가 설정 파일을 읽지 못했습니다. 실행 계정의 접근 권한과 PHP 경로 제한을 확인하세요.'
+        elif self.server_checks.get('config_json_object') is False:
+            hint = '서버 설정 파일을 JSON으로 해석하지 못했습니다. 설정 파일 형식을 확인하세요.'
+        else:
+            hint = '서버 추출 설정을 확인하지 못했습니다. 설치 경로와 필수 설정 항목을 확인하세요.'
+        super().__init__(hint,'service_not_configured',diagnostic)
+
+
 def write_failure(output, exception, phase):
     code = 'CANCELLED' if isinstance(exception,Cancelled) else 'BROWSER_UNAVAILABLE' if isinstance(exception,BrowserUnavailable) else 'COLLECTION_ERROR'
     matched = re.search(r'\[([A-Za-z0-9_]+)\]',str(exception))
@@ -77,6 +95,10 @@ def write_failure(output, exception, phase):
             'http_status':data.get('http_status') if type(data.get('http_status')) is int and 100<=data['http_status']<=599 else None,
             'content_type':data.get('content_type') if data.get('content_type') in MEDIA|{'missing','other'} else 'other',
             'body_kind':data.get('body_kind') if data.get('body_kind') in BODY_KINDS else 'other'}
+    checks = getattr(exception,'server_checks',None)
+    if isinstance(checks,dict):
+        record['server_checks'] = {key:value for key,value in checks.items()
+                                   if key in SERVICE_CHECKS and type(value) is bool}
     data = getattr(exception,'filesystem_diagnostic',None)
     if isinstance(data,dict):
         record['filesystem'] = {
