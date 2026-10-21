@@ -129,7 +129,7 @@ class LargePersonalMailTests(unittest.TestCase):
             with patch('segio_archive.db_client.download_opener',return_value=opener),patch.object(client,'finalize_download',side_effect=failed_finalize):
                 with self.assertRaisesRegex(CollectionError,'LOCAL_INDEX_PENDING'):
                     client.receive({'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest()})
-            saved=next((root/'output').glob('segio-employee-partial*'))
+            saved=next((root/'output').glob('segio-employee*'))
             self.assertEqual((saved/'mail/raw/000000.bin').read_bytes(),payload)
             self.assertFalse(list((root/'output').glob('*.zip')))
             self.assertFalse(list((root/'output').glob('.segio-download-*')))

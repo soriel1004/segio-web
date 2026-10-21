@@ -1,6 +1,6 @@
 """Disk-backed mail title index and portable mail pages from original MBOX."""
 from __future__ import annotations
-from contextlib import closing
+from contextlib import closing, nullcontext
 from email import policy
 from email.parser import BytesHeaderParser, BytesParser
 import hashlib
@@ -115,7 +115,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                 indexed_bytes += source['bytes']
                 report('index', indexed_bytes, total_bytes)
                 continue
-            with path.open('rb') as stream:
+            with path.open('rb') as stream, (closing(spans) if hasattr(spans,'close') else nullcontext()):
                 for start, end in spans:
                     checkpoint()
                     message = read_headers(stream, start, end)
@@ -135,7 +135,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             report('index', indexed_bytes, total_bytes)
         db.execute('CREATE INDEX title_index ON items(kind,title)')
         db.commit()
-    temporary.replace(database)
+    from .file_ops import replace_file
+    replace_file(temporary, database, checkpoint)
     manifest['counts']['mail'] = mail_count
     manifest['viewer'] = 'sqlite-mail/1'
     manifest['coverage'] = [entry for entry in manifest['coverage'] if entry.get('kind') != 'mail_index']

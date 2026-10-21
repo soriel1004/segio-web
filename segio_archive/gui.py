@@ -291,7 +291,16 @@ class App(tk.Tk):
         except Cancelled as exc:
             self.events.put(('archive_error',str(exc)))
         except Exception as exc:
-            self.events.put(('archive_error','메일 바로보기 변환에 실패했습니다. 저장 공간과 파일 무결성을 확인하세요. ['+type(exc).__name__+']'))
+            from .db_client import processing_error
+            from .client_diagnostics import write_failure
+            error = exc if isinstance(exc,CollectionError) else processing_error(exc,'Windows DB·메일 검색 색인 생성')
+            message = str(error)+'\n저장된 원본은 유지됩니다. 원인을 해결한 뒤 ‘기존 백업 갱신’을 다시 실행하세요.'
+            try:
+                recorded = write_failure(path.parent,error,'Windows DB·메일 검색 색인 생성')
+                message += '\n오류 기록: '+str(recorded)
+            except OSError:
+                pass
+            self.events.put(('archive_error',message))
 
     def verify(self):
         path = self.select_archive()

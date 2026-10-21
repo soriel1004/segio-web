@@ -77,6 +77,14 @@ def write_failure(output, exception, phase):
             'http_status':data.get('http_status') if type(data.get('http_status')) is int and 100<=data['http_status']<=599 else None,
             'content_type':data.get('content_type') if data.get('content_type') in MEDIA|{'missing','other'} else 'other',
             'body_kind':data.get('body_kind') if data.get('body_kind') in BODY_KINDS else 'other'}
+    data = getattr(exception,'filesystem_diagnostic',None)
+    if isinstance(data,dict):
+        record['filesystem'] = {
+            'exception_type':data.get('exception_type') if data.get('exception_type') in (
+                'PermissionError','FileNotFoundError','FileExistsError','OSError','IsADirectoryError','NotADirectoryError') else 'OSError',
+            'errno':data.get('errno') if type(data.get('errno')) is int else None,
+            'winerror':data.get('winerror') if type(data.get('winerror')) is int else None,
+            'operation':data.get('operation') if data.get('operation') in ('replace','file_io') else 'file_io'}
     output = Path(output).expanduser().resolve()
     output.mkdir(parents=True,exist_ok=True)
     destination = output/'last-client-failure.json'

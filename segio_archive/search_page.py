@@ -50,24 +50,25 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
             if kind in counts:
                 counts[kind] = count
         cursor = db.execute('SELECT i.id,i.kind,i.title,i.folders,i.html,i.body,'+meta.date_sql+','+meta.payload_sql+' FROM items i '+meta.joins+' ORDER BY '+meta.order)
-        while rows := cursor.fetchmany(CHUNK_SIZE):
-            checkpoint()
-            name = f'search/part-{len(chunks):06d}.js'
-            packed=[]
-            for identity,kind,title,folder,link,body,date_raw,payload in rows:
-                categories=meta.categories(payload) if kind=='approval' else []
-                for key in categories:
-                    approval_counts[key]+=1
-                info=folders.info(folder) if kind=='mail' else None
-                if kind=='mail' and manifest.get('portable_mail'):
-                    from .portable_mail import page_path
-                    link=page_path(identity)
-                packed.append((identity,kind,title,info['label'] if info else ' · '.join(CATEGORIES[key] for key in categories),
-                               link,body,info['id'] if info else '',folder,
-                               item_date(kind,date_raw,payload),date_raw if kind=='mail' else '',categories))
-            rows=packed
-            write(name, 'window.archiveChunk='+script_json(rows)+';')
-            chunks.append(name)
+        with closing(cursor):
+            while rows := cursor.fetchmany(CHUNK_SIZE):
+                checkpoint()
+                name = f'search/part-{len(chunks):06d}.js'
+                packed=[]
+                for identity,kind,title,folder,link,body,date_raw,payload in rows:
+                    categories=meta.categories(payload) if kind=='approval' else []
+                    for key in categories:
+                        approval_counts[key]+=1
+                    info=folders.info(folder) if kind=='mail' else None
+                    if kind=='mail' and manifest.get('portable_mail'):
+                        from .portable_mail import page_path
+                        link=page_path(identity)
+                    packed.append((identity,kind,title,info['label'] if info else ' · '.join(CATEGORIES[key] for key in categories),
+                                   link,body,info['id'] if info else '',folder,
+                                   item_date(kind,date_raw,payload),date_raw if kind=='mail' else '',categories))
+                rows=packed
+                write(name, 'window.archiveChunk='+script_json(rows)+';')
+                chunks.append(name)
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes, 'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
     if manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1':

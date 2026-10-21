@@ -6,6 +6,7 @@ from email.header import Header, decode_header
 from pathlib import Path
 
 from .web import CollectionError
+from .file_ops import replace_file
 
 PARSE_LIMIT = 32 * 1024 * 1024
 
@@ -29,6 +30,27 @@ def header_text(value):
         return str(value or '')
 
 
+def reconcile_mail_source(root, source, files, checkpoint):
+    """Recover an interrupted extension rename using manifest SHA-256 evidence."""
+    from .compact_mail import digest_file
+    name = source['path']
+    stem = str(Path(name).with_suffix('')).replace('\\','/')
+    candidates = [stem + suffix for suffix in ('.bin','.mbox','.eml')]
+    expected = {key:source.get(key) for key in ('bytes','sha256')}
+    recorded = [value for value in candidates if files.get(value) == expected]
+    present = [value for value in candidates if (root/value).is_file()]
+    if (len(recorded)!=1 or len(present)!=1 or
+            any((root/value).is_symlink() for value in candidates)):
+        raise CollectionError('메일 원본 경로 또는 검증 정보가 일치하지 않습니다.')
+    actual = present[0]
+    if actual != name or recorded[0] != name:
+        if digest_file(root/actual,checkpoint) != expected:
+            raise CollectionError('중단된 메일 이름 변경을 복구할 수 없습니다. 원본 SHA-256이 일치하지 않습니다.')
+        files[actual] = files.pop(recorded[0])
+        source['path'] = actual
+    return source['path']
+
+
 def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _:None, progress=None):
     """Personal-login archives use the same bounded SQLite/MIME pipeline as SSH."""
     from .archive import atomic_write
@@ -50,9 +72,9 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
         checkpoint()
         name = source['path']
         safe_member(name)
-        if (not re.fullmatch(r'mail/raw/[0-9]{6}\.(bin|mbox|eml)', name) or name not in files or
-                any(source.get(key) != files[name][key] for key in ('bytes','sha256'))):
+        if not re.fullmatch(r'mail/raw/[0-9]{6}\.(bin|mbox|eml)', name):
             raise CollectionError('메일 원본 경로 또는 검증 정보가 일치하지 않습니다.')
+        name = reconcile_mail_source(root,source,files,checkpoint)
         path = root/name
         if path.stat().st_size != source['bytes']:
             raise CollectionError('메일 원본 크기가 변경되었습니다.')
@@ -69,7 +91,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
         if renamed != name:
             if (root/renamed).exists():
                 raise CollectionError('메일 원본 이름이 중복됩니다.')
-            path.rename(root/renamed)
+            replace_file(path, root/renamed, checkpoint)
             files[renamed] = files.pop(name)
             source['path'] = renamed
         # Persist each rename before the next cancellable operation.

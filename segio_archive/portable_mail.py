@@ -197,9 +197,13 @@ def render_record(root, manifest, stream, record, checkpoint):
                     output.write(part)
                     digest.update(part)
                     size+=len(part)
-            temporary.replace(path)
+            from .file_ops import replace_file
+            replace_file(temporary, path, checkpoint)
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         generated[name]={'bytes':size,'sha256':digest.hexdigest()}
 
     message,parts=mime_parts(stream,record['begin'],record['end'],checkpoint)
@@ -263,7 +267,7 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
         report('render', 0, total, unit='messages')
         rows=db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON m.id=i.id ORDER BY m.source,m.begin')
-        with SourceReader() as opened:
+        with closing(rows), SourceReader() as opened:
             for row in rows:
                 checkpoint()
                 record=dict(row)
@@ -315,7 +319,9 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=No
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
     manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('local_processing',{}).get('state') == 'pending' and isinstance(manifest.get('live_export'),dict):
+    if isinstance(manifest.get('live_export'),dict) and (
+            manifest.get('local_processing',{}).get('state') == 'pending' or
+            not (root/'catalog.sqlite3').is_file()):
         from .mail_import import build_local_catalog
         return build_local_catalog(root,manifest['user'],checkpoint,log,progress)
     if manifest.get('viewer')=='local-db/1' or (manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1' and (root/'catalog.sqlite3').is_file()):

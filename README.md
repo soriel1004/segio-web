@@ -1,14 +1,24 @@
-# 개인 SEGIO 로그인으로 자료 받기 · v0.5.5
+# 개인 SEGIO 로그인으로 자료 받기 · v0.5.6
 
-개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.5 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.5.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.5**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.6 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.6.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.6**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
 
-프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.5.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
+프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.6.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
 
 첫 화면은 **결재 문서·메일·암호화되지 않은 HTTP 연결 허용**만 기본 선택합니다. HTTPS 주소에서는 인증서 검증을 유지합니다. 개인 로그인 방식은 [서버 연결 기능](docs/WINDOWS_LOGIN.md)이 설치되어 있어야 하며, 서버에는 전송·검증용 임시 ZIP이 필요합니다. 내려받은 뒤 다시 ZIP을 만들거나 최종 ZIP을 추가 저장하지 않고 **백업 폴더만** 남깁니다. SSH 방식의 추가 ZIP도 기본 해제입니다.
 
 첫 화면은 **개인 SEGIO 로그인으로 자료 받기** 전용이며 가져오기 방식 목록을 표시하지 않습니다. 기본 서버는 `lssgroup.co.kr`의 기존 로그인 경로이고, 계정 입력 이름은 **그룹웨어 ID·그룹웨어 암호**입니다.
 
-서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.5 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.6 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+
+## Windows 파일 접근 거부·색인 복구
+
+v0.5.6은 Windows 프로그램 갱신으로 적용하며, v0.5.5 서버 도구는 계속 사용합니다. `FILE_ACCESS_DENIED`는 PC 파일 작업이 거부됐다는 뜻입니다. 기존 기록만으로 잠금을 건 프로그램이나 권한·보호 정책의 정확한 원인을 확정할 수는 없습니다.
+
+개인 로그인 백업은 내려받은 자료를 새 `segio-ID` 폴더에 검증하고 그 폴더 안에서 색인·메일 본문·첨부를 생성합니다. 검증 완료 후 로컬 오류가 나도 원본을 임시 폴더 정리로 지우거나 열린 파일을 다른 폴더로 옮기지 않습니다. 미완료 상태를 기록하고 오류 팝업에 저장 위치를 표시합니다. **‘기존 백업 갱신’에서 해당 폴더를 선택**하면 서버에서 다시 받지 않고 로컬 처리를 재실행합니다. 기존 v0.5.2~0.5.5의 `segio-ID-partial` 폴더도 처리합니다. 이미 삭제된 이전 임시 자료를 복원하는 기능은 아닙니다.
+
+명시적인 Windows 공유·잠금 오류 32/33에 한해 파일 교체를 최대 네 번 재시도합니다. 일반적인 접근 거부 5·권한 문제는 반복하지 않고 중단하며 권한이나 보안 설정을 변경하지 않습니다. 메타데이터는 고유 임시 파일을 닫은 뒤 교체하고, 예외가 나도 MBOX 읽기와 SQLite 커서를 닫습니다. 메일 확장자 변경과 메타데이터 갱신 사이에 중단됐다면 기존 manifest의 SHA-256으로 동일 원본인지 검증한 뒤 복구합니다.
+
+새 `last-client-failure.json`의 `filesystem`에는 허용된 예외 종류·`errno`·`winerror`·작업 종류만 추가됩니다. 개인 파일명·경로·메일 내용·예외 원문은 저장하지 않습니다. 오류가 반복되면 팝업에서 안내한 폴더를 보존하고 이 JSON 내용을 확인하세요. 영구적인 권한 문제는 쓰기 가능한 다른 로컬 저장 폴더를 사용하거나 실제 차단 원인을 해결해야 합니다. Windows 프로그램은 Python 3.12의 `run_windows.bat` 또는 해당 버전의 성공한 Windows 빌드를 사용합니다.
 
 ## 서버 응답 오류 기록
 

@@ -27,6 +27,7 @@ from .archive import safe_name
 from .web import Collector, CollectionError, Config, origin
 from .client_diagnostics import BridgeResponseError, response_summary, write_failure
 from .progress import ProgressReporter
+from .file_ops import file_diagnostic
 
 BRIDGE = "/segio/archive/bridge.php"
 PROTOCOL = "segio-login-archive/1"
@@ -62,7 +63,9 @@ def processing_error(exc, phase):
             code, hint = 'FILE_IO_ERROR', '저장 공간과 폴더 접근 권한을 확인하세요.'
     else:
         code, hint = 'UNEXPECTED_PROCESSING_ERROR', '서버 연결과 설치 상태를 확인하세요.'
-    return CollectionError('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))
+    error = CollectionError('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))
+    error.filesystem_diagnostic = file_diagnostic(exc)
+    return error
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -197,6 +200,21 @@ def publish_local(staging, archive, output, username):
     raise CollectionError("같은 이름의 보관함이 너무 많습니다. 다른 저장 폴더를 선택하세요.")
 
 
+def reserve_personal_folder(output, username):
+    """Index in the final reserved folder, never move open verified originals."""
+    for number in range(1, 100000):
+        name = 'segio-' + safe_name(username, 100) + (f'-{number}' if number > 1 else '')
+        folder = output/name
+        if (output/(name + '.zip')).exists():
+            continue
+        try:
+            folder.mkdir(mode=0o700)
+            return folder
+        except FileExistsError:
+            continue
+    raise CollectionError('같은 이름의 보관함이 너무 많습니다. 다른 저장 폴더를 선택하세요.')
+
+
 class PreparedDBCollector(Collector):
     keep_zip = True
 
@@ -263,7 +281,7 @@ class PreparedDBCollector(Collector):
         output.mkdir(parents=True, exist_ok=True)
         if record['bytes'] + 64*1024*1024 > shutil.disk_usage(output).free:
             raise CollectionError("ZIP을 저장할 공간이 부족합니다.")
-        with tempfile.TemporaryDirectory(prefix='.segio-download-', dir=output) as temporary:
+        with tempfile.TemporaryDirectory(prefix='.segio-download-', dir=output, ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             archive = root/'download.zip'
             destination = root/'contents'
@@ -303,24 +321,41 @@ class PreparedDBCollector(Collector):
                 raise CollectionError("ZIP의 크기 또는 SHA-256 검증에 실패했습니다. 보관 완료로 처리하지 않았습니다.")
             self.log("ZIP과 내부 파일 검증 중")
             self.phase = '내려받은 파일 검증'
-            unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
-            self.validate_download(destination)
-            if not self.keep_zip:
-                archive.unlink()
+            if self.keep_zip:
+                unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
+                self.validate_download(destination)
+            else:
+                # Verify directly into a reserved persistent folder. Once
+                # verified, temporary cleanup must never delete these files.
+                destination = reserve_personal_folder(output, self.config.username)
+                try:
+                    unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
+                    self.validate_download(destination)
+                except BaseException:
+                    try:
+                        shutil.rmtree(destination)
+                    except OSError:
+                        self.log('검증 미완료 폴더를 자동 정리하지 못했습니다. 이 폴더는 백업 완료 상태가 아닙니다.')
+                    raise
             try:
+                if not self.keep_zip:
+                    from .archive import atomic_write
+                    manifest = json.loads((destination/'manifest.json').read_text(encoding='utf-8'))
+                    manifest['local_processing'] = {'state':'pending'}
+                    atomic_write(destination/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+                    archive.unlink()
                 self.checkpoint()
                 self.finalize_download(root, archive, destination)
-            except Exception:
+            except Exception as exc:
                 if self.keep_zip:
                     raise
-                # Preserve verified originals after a local processing failure.
-                from .archive import atomic_write
-                manifest = json.loads((destination/'manifest.json').read_text(encoding='utf-8'))
-                manifest['local_processing'] = {'state':'pending'}
-                atomic_write(destination/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
-                saved = publish_local(destination, None, output, self.config.username+'-partial')
-                raise CollectionError('다운로드와 원본 검증은 끝났지만 로컬 색인을 완료하지 못했습니다. 저장 공간을 확인한 뒤 ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(saved)+' [LOCAL_INDEX_PENDING]') from None
+                reason = exc if isinstance(exc,CollectionError) else processing_error(exc,self.phase)
+                error = CollectionError(str(reason)+'\n검증된 원본은 보존했습니다. ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(destination)+' [LOCAL_INDEX_PENDING]')
+                error.filesystem_diagnostic = getattr(reason,'filesystem_diagnostic',None)
+                raise error from None
             self.progress('finalize')
+            if not self.keep_zip:
+                return destination
             return publish_local(destination, archive if self.keep_zip else None, output, self.config.username)
 
     def run(self, password: str) -> Path:

@@ -5,6 +5,8 @@ import html
 import json
 import re
 import sqlite3
+import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,10 +33,18 @@ def safe_name(value: str, limit: int = 70) -> str:
 
 
 def atomic_write(path: Path, data: bytes) -> None:
+    from .file_ops import replace_file
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_bytes(data)
-    temp.replace(path)
+    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(data)
+        replace_file(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
 def item_key(kind: str, identity: str) -> str:
