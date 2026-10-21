@@ -1,6 +1,8 @@
 # 개인 SEGIO 로그인으로 자료 받기 · v0.5.0
 
-개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [최신 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/archive/refs/heads/main.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.0**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.0 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.0.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.0**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+
+프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.0.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
 
 첫 화면은 **결재 문서·메일·암호화되지 않은 HTTP 연결 허용**만 기본 선택합니다. HTTPS 주소에서는 인증서 검증을 유지합니다. 개인 로그인 방식은 [서버 연결 기능](docs/WINDOWS_LOGIN.md)이 설치되어 있어야 하며, 서버에는 전송·검증용 임시 ZIP이 필요합니다. 내려받은 뒤 다시 ZIP을 만들거나 최종 ZIP을 추가 저장하지 않고 **백업 폴더만** 남깁니다. SSH 방식의 추가 ZIP도 기본 해제입니다.
 

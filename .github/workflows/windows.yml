@@ -71,8 +71,14 @@ jobs:
       - name: Build Windows application
         shell: pwsh
         run: ./build_windows.ps1
+      - name: Read program version
+        shell: pwsh
+        run: |
+          $version = python -c "from segio_archive import __version__; print(__version__)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read program version' }
+          Add-Content $env:GITHUB_ENV "SEGIO_VERSION=$version"
       - uses: actions/upload-artifact@v5
         with:
-          name: SEGIOArchive-Windows
-          path: dist/SEGIOArchive-Windows.zip
+          name: segio-web-${{ env.SEGIO_VERSION }}
+          path: dist/segio-web-${{ env.SEGIO_VERSION }}.zip
           if-no-files-found: error

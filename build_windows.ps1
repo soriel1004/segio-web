@@ -17,5 +17,9 @@ Copy-Item README.md dist\SEGIOArchive\README.md
 Copy-Item docs dist\SEGIOArchive\docs -Recurse
 New-Item -ItemType Directory -Force -Path dist\SEGIOArchive\tools | Out-Null
 Get-ChildItem tools -File | Copy-Item -Destination dist\SEGIOArchive\tools
-Compress-Archive -Path dist\SEGIOArchive -DestinationPath dist\SEGIOArchive-Windows.zip -Force
-Write-Host "Built dist\SEGIOArchive-Windows.zip. Keep the complete folder beside SEGIOArchive.exe."
+$version = (& $python -c "from segio_archive import __version__; print(__version__)").Trim()
+Check-Exit
+if ($version -notmatch '^\d+\.\d+\.\d+(?:[A-Za-z0-9.-]*)$') { throw "Invalid program version: $version" }
+$archivePath = "dist\segio-web-$version.zip"
+Compress-Archive -Path dist\SEGIOArchive -DestinationPath $archivePath -Force
+Write-Host "Built $archivePath. Keep the complete folder beside SEGIOArchive.exe."
