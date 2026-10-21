@@ -263,11 +263,11 @@ class LiveWorkerTests(unittest.TestCase):
                     legacy=next(source for source in sources if source['name']=='한글.idx')
                     self.assertEqual(legacy['name_bytes_hex'],'한글.idx'.encode('cp949').hex())
                     self.assertEqual((folder/legacy['path']).read_bytes(),b'\x00SYNTHETIC_CP949_INDEX\x00')
-                self.assertEqual(next((folder/'mail/messages/00000002/attachments').iterdir()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
+                self.assertEqual(next((folder/'mail/offline/mail-000000002/attachments').iterdir()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
                 for file in folder.rglob('*'):
                     if file.is_file():
                         self.assertNotIn(b'OTHER_USER_MUST_NOT_EXPORT',file.read_bytes())
-                page=(folder/'mail/messages/00000001/document.html').read_text(encoding='utf-8')
+                page=(folder/'mail/offline/mail-000000001/index.html').read_text(encoding='utf-8')
                 self.assertNotIn('window.UNSAFE',page)
                 self.assertNotIn('https://external',page)
 

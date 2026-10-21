@@ -82,7 +82,7 @@ class BrowserTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "win32", "Windows desktop test; Linux has no display")
 class WindowsStartupTests(unittest.TestCase):
     def test_login_window_opens_without_browser_download_or_launch(self):
-        from segio_archive.gui import App, APP_TITLE, SSH_MODE, DB_MODE, WEB_MODE
+        from segio_archive.gui import App, APP_TITLE, DB_MODE
         with patch("segio_archive.browser.launch_browser") as launch:
             app = App()
             try:
@@ -93,29 +93,20 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertEqual(app.user.get(), "")
                 self.assertEqual(app.password.get(), "")
                 self.assertEqual(app.method.get(), DB_MODE)
-                self.assertEqual(app.ssh_host.get(),'192.168.0.100')
-                self.assertEqual(app.ssh_port.get(),'22')
-                self.assertEqual(app.ssh_user.get(),'root')
-                self.assertTrue(app.resume.get())
-                self.assertFalse(app.make_zip.get())
+                self.assertIn('192.168.0.100',app.server.get())
+                self.assertFalse(hasattr(app,'method_box'))
                 self.assertTrue(app.approvals.get())
                 self.assertTrue(app.mail.get())
                 self.assertFalse(app.pdf.get())
                 self.assertTrue(app.http.get())
                 self.assertFalse(app.manual.get())
                 self.assertTrue(app.web_form.winfo_ismapped())
-                self.assertFalse(app.ssh_form.winfo_ismapped())
-                app.method.set(SSH_MODE)
-                app.change_method()
-                app.update_idletasks()
-                app.update()
-                self.assertTrue(app.ssh_form.winfo_ismapped())
-                app.method.set(WEB_MODE)
-                app.change_method()
-                self.assertTrue(app.mail.get())
-                app.method.set(DB_MODE)
-                app.change_method()
-                self.assertTrue(app.mail.get())
+                def descendants(widget):
+                    return [child for child in widget.winfo_children() for child in [child]+descendants(child)]
+                labels=[str(widget.cget('text')) for widget in descendants(app) if widget.winfo_class()=='TLabel']
+                self.assertIn('그룹웨어 ID',labels)
+                self.assertIn('그룹웨어 암호',labels)
+                self.assertNotIn('가져오기 방식',labels)
                 self.assertFalse(app.running)
                 launch.assert_not_called()
             finally:

@@ -60,11 +60,15 @@ def headers(stream, start, end):
     return BytesHeaderParser(policy=policy.compat32).parsebytes(bytes(data)), stream.tell()
 
 
-def mime_parts(stream, start, end, checkpoint, depth=0):
+def mime_parts(stream, start, end, checkpoint, depth=0, budget=None):
     """Find MIME leaves by offsets, never loading a full attachment/message."""
     if depth > 20:
         raise CollectionError('메일 MIME 중첩 단계가 너무 많습니다.')
+    budget = budget if budget is not None else {'headers':0}
     message, body = headers(stream,start,end)
+    budget['headers'] += body-start
+    if budget['headers'] > 8*1024*1024:
+        raise CollectionError('한 메일의 MIME 헤더 합계가 너무 큽니다. 원본은 보존됩니다.')
     if message.get_content_maintype() != 'multipart':
         return message, [(message,body,end)]
     boundary = message.get_boundary()
@@ -100,7 +104,7 @@ def mime_parts(stream, start, end, checkpoint, depth=0):
             stream.seek(max(after,stop-2))
             tail=stream.read(stop-max(after,stop-2))
             stop-=2 if tail.endswith(b'\r\n') else int(tail.endswith(b'\n'))
-        _,children=mime_parts(stream,after,stop,checkpoint,depth+1)
+        _,children=mime_parts(stream,after,stop,checkpoint,depth+1,budget)
         leaves.extend(children)
         if len(leaves)>10000:
             raise CollectionError('메일의 MIME 부분이 너무 많습니다.')
@@ -177,14 +181,19 @@ def render_record(root, manifest, stream, record, checkpoint):
     generated={}
 
     def write(name, parts):
+        from .storage import require_space
         path=local_path(root,name)
         path.parent.mkdir(parents=True,exist_ok=True)
         temporary=path.with_name(path.name+'.partial')
         digest,size=hashlib.sha256(),0
+        next_space_check = 0
         try:
             with temporary.open('wb') as output:
                 for part in parts:
                     checkpoint()
+                    if size >= next_space_check:
+                        require_space(root, len(part), '메일 바로보기')
+                        next_space_check = size + 64*1024*1024
                     output.write(part)
                     digest.update(part)
                     size+=len(part)
@@ -195,6 +204,7 @@ def render_record(root, manifest, stream, record, checkpoint):
 
     message,parts=mime_parts(stream,record['begin'],record['end'],checkpoint)
     plain,rich,attachments,images,notes=[],[],[],{},[]
+    text_bytes = 0
     for number,(part,start,end) in enumerate(parts):
         checkpoint()
         filename=part.get_filename()
@@ -212,13 +222,15 @@ def render_record(root, manifest, stream, record, checkpoint):
         else:
             data=bytearray()
             for block in payload:
-                remaining=TEXT_LIMIT-len(data)
+                remaining=max(0,TEXT_LIMIT-text_bytes-len(data))
                 data.extend(block[:remaining])
                 if len(block)>remaining:
                     notes.append('매우 큰 본문은 처음 8 MiB까지 표시합니다. 전체 내용은 원본 MBOX에 보존됩니다.')
                     break
             text=decode_bytes(bytes(data),part.get_content_charset())
-            (rich if part.get_content_type()=='text/html' else plain).append(text)
+            text_bytes += len(data)
+            if text:
+                (rich if part.get_content_type()=='text/html' else plain).append(text)
     content='\n'.join(safe_html(text,images) for text in rich) if rich else '<pre>'+html.escape('\n'.join(plain) or '본문이 없는 메일입니다.')+'</pre>'
     attachment_html=''.join('<li><a class="attachment" target="_blank" rel="noopener noreferrer" href="'+html.escape(quote(name,safe='/'),quote=True)+'">'+html.escape(filename)+'</a></li>' for filename,name in attachments)
     extra=''.join('<p>'+html.escape(note)+'</p>' for note in dict.fromkeys(notes))
@@ -300,6 +312,9 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None):
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
     manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('local_processing',{}).get('state') == 'pending' and isinstance(manifest.get('live_export'),dict):
+        from .mail_import import build_local_catalog
+        return build_local_catalog(root,manifest['user'],checkpoint,log)
     if manifest.get('viewer')=='local-db/1' or (manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1' and (root/'catalog.sqlite3').is_file()):
         from .search_page import install_search_page
         return install_search_page(root,checkpoint=checkpoint)

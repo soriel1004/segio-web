@@ -30,7 +30,7 @@ BOXES = {
 DETAILS = {"view_format.php", "view_format_for_link.php", "general_view.php", "text_sender_view.php"}
 MUTATION = re.compile(r"delete|remove|restore|backup_document|logout|clean(?:spam|trash)|act_rm|approve|reject", re.I)
 ALLOWED_QUERY = {"no", "uid", "view", "page", "send_no", "rotation_no", "sno", "link_no", "chk_link_view"}
-DEFAULT_SERVER = "http://lssgroup.co.kr/icons/app/cms/?html=/home/login.html&shell=/index.shell:483"
+DEFAULT_SERVER = "http://192.168.0.100/icons/app/cms/?html=/home/login.html&shell=/index.shell:483"
 
 
 class CollectionError(RuntimeError):

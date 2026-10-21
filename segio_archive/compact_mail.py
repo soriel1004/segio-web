@@ -67,8 +67,8 @@ def read_headers(stream, start, end):
 def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None):
     from .db_client import safe_member
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('user') != user or manifest.get('ssh_export', {}).get('authentication') != 'administrator_ssh':
-        raise CollectionError('SSH 보관본의 직원 ID 또는 추출 형식이 일치하지 않습니다.')
+    if manifest.get('user') != user or not (manifest.get('ssh_export', {}).get('authentication') == 'administrator_ssh' or isinstance(manifest.get('live_export'), dict)):
+        raise CollectionError('보관본의 그룹웨어 ID 또는 추출 형식이 일치하지 않습니다.')
     files = manifest['files']
     sources = json.loads((root/'mail/sources.json').read_text(encoding='utf-8')) if (root/'mail/sources.json').exists() else {'sources': []}
     if sources.get('user', user) != user:
@@ -77,6 +77,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     temporary.unlink(missing_ok=True)
     mail_count, issue_count = 0, 0
     with closing(sqlite3.connect(temporary)) as db:
+        db.execute('PRAGMA temp_store=FILE')
+        db.execute('PRAGMA cache_size=-8192')
         db.execute('CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, folders TEXT, body TEXT, html TEXT)')
         db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
         db.execute('CREATE TABLE mail_records (id TEXT PRIMARY KEY, source TEXT, begin INTEGER, end INTEGER, sender TEXT, receiver TEXT, date TEXT)')
@@ -130,6 +132,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     manifest['coverage'] = [entry for entry in manifest['coverage'] if entry.get('kind') != 'mail_index']
     manifest['coverage'].append({'kind':'mail_index', 'status':'headers_indexed', 'saved':mail_count,
                                  'unrecognized_files':issue_count, 'body':'read_from_raw_on_demand'})
+    if manifest.get('live_export') is not None:
+        manifest['mail_index_storage'] = 'sqlite-offsets/1'
     warning = '메일은 제목·보낸 사람·받는 사람을 검색합니다. 본문·첨부는 원본에서 열람할 때 읽습니다.'
     if warning not in manifest['warnings']:
         manifest['warnings'].append(warning)

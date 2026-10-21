@@ -217,12 +217,12 @@ class CompactMailTests(unittest.TestCase):
                 stream.seek(spans[1][0])
                 self.assertTrue(stream.read(30).startswith(b'Subject: Second'))
 
-    def test_sqlite_mail_offsets_above_four_gib_are_not_truncated(self):
+    def test_sqlite_mail_offsets_above_fifty_gib_are_not_truncated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()
             (root/'mail/raw').mkdir(parents=True)
             source=root/'mail/raw/000000.mbox'
-            offset=2**32+4096
+            offset=50*1024**3+4096
             payload=b'Subject: Sparse offset\n\nbody\n'
             with source.open('wb') as stream:
                 if os.name=='nt':

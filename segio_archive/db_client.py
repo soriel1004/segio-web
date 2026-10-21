@@ -6,6 +6,7 @@ never submits a target ID, DB credentials or commands to that bridge.
 from __future__ import annotations
 
 import hashlib
+import errno
 import http.cookiejar
 import json
 import os
@@ -51,7 +52,12 @@ def processing_error(exc, phase):
     elif isinstance(exc, PermissionError):
         code, hint = 'FILE_ACCESS_DENIED', '저장 폴더 권한과 다른 프로그램에서 보관 파일을 열고 있는지 확인하세요.'
     elif isinstance(exc, OSError):
-        code, hint = 'FILE_IO_ERROR', '저장 공간과 폴더 접근 권한을 확인하세요.'
+        if exc.errno == errno.ENOSPC:
+            code, hint = 'DISK_FULL', '저장 공간이 부족합니다. 여유 공간을 확보하거나 다른 드라이브를 선택하세요.'
+        elif exc.errno == errno.EFBIG:
+            code, hint = 'FILE_TOO_LARGE', '드라이브의 단일 파일 크기 제한에 걸렸습니다. NTFS 또는 exFAT 드라이브를 선택하세요.'
+        else:
+            code, hint = 'FILE_IO_ERROR', '저장 공간과 폴더 접근 권한을 확인하세요.'
     else:
         code, hint = 'UNEXPECTED_PROCESSING_ERROR', '서버 연결과 설치 상태를 확인하세요.'
     return CollectionError('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))
@@ -191,7 +197,7 @@ class PreparedDBCollector(Collector):
         self.phase = '시작'
         self.user_agent = None
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
-            raise CollectionError("정확한 직원 SEGIO ID를 입력하세요.")
+            raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
 
     def info(self):
         response = self.context.request.get(urljoin(self.base, BRIDGE+'?action=info'),
@@ -228,6 +234,9 @@ class PreparedDBCollector(Collector):
     def finalize_download(self, root, archive, destination):
         pass
 
+    def validate_download(self, destination):
+        pass
+
     def cleanup_remote(self):
         pass
 
@@ -249,6 +258,7 @@ class PreparedDBCollector(Collector):
             digest = hashlib.sha256()
             count = 0
             self.log("DB 보관 ZIP 다운로드 중")
+            next_progress = time.monotonic()+5
             self.phase = '보관 ZIP 다운로드'
             try:
                 with opener.open(request, timeout=60) as incoming, archive.open('xb') as outgoing:
@@ -263,7 +273,11 @@ class PreparedDBCollector(Collector):
                             raise CollectionError("보관 ZIP 크기가 검증 정보와 다릅니다.")
                         outgoing.write(block)
                         digest.update(block)
-            except (urllib.error.URLError, TimeoutError, OSError):
+                        if time.monotonic() >= next_progress:
+                            self.log('다운로드 %.1f / %.1f GiB (%.0f%%)' %
+                                     (count/1024**3, record['bytes']/1024**3, count*100/record['bytes']))
+                            next_progress = time.monotonic()+5
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
                 raise CollectionError("다운로드가 끊겼거나 세션이 만료되었습니다. 다시 로그인해 받아주세요.") from None
             self.checkpoint()
             if count!=record['bytes'] or digest.hexdigest()!=record['sha256']:
@@ -271,8 +285,22 @@ class PreparedDBCollector(Collector):
             self.log("ZIP과 내부 파일 검증 중")
             self.phase = '내려받은 파일 검증'
             unpack_verified(archive, destination, self.config.username, self.checkpoint)
-            self.checkpoint()
-            self.finalize_download(root, archive, destination)
+            self.validate_download(destination)
+            if not self.keep_zip:
+                archive.unlink()
+            try:
+                self.checkpoint()
+                self.finalize_download(root, archive, destination)
+            except Exception:
+                if self.keep_zip:
+                    raise
+                # Preserve verified originals after a local processing failure.
+                from .archive import atomic_write
+                manifest = json.loads((destination/'manifest.json').read_text(encoding='utf-8'))
+                manifest['local_processing'] = {'state':'pending'}
+                atomic_write(destination/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+                saved = publish_local(destination, None, output, self.config.username+'-partial')
+                raise CollectionError('다운로드와 원본 검증은 끝났지만 로컬 색인을 완료하지 못했습니다. 저장 공간을 확인한 뒤 ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(saved)+' [LOCAL_INDEX_PENDING]') from None
             return publish_local(destination, archive if self.keep_zip else None, output, self.config.username)
 
     def run(self, password: str) -> Path:
@@ -478,7 +506,7 @@ class DBCollector(PreparedDBCollector):
             raise CollectionError('서버 작업 번호가 올바르지 않습니다.')
         self.job = job
         previous = None
-        deadline = time.monotonic()+6*3600
+        deadline = time.monotonic()+72*3600
         while time.monotonic()<deadline:
             self.checkpoint()
             status = self.live_call('status')
@@ -508,16 +536,18 @@ class DBCollector(PreparedDBCollector):
     def download_endpoint(self, record):
         return urljoin(self.base, LIVE_BRIDGE+'?'+urlencode({'action':'download','job':self.job}))
 
-    def finalize_download(self, root, archive, destination):
-        from .mail_import import build_local_catalog
+    def validate_download(self, destination):
         manifest = json.loads((destination/'manifest.json').read_text(encoding='utf-8'))
         live = manifest.get('live_export',{})
         if (live.get('job')!=self.job or live.get('approvals')!=self.config.approvals or
             live.get('mail')!=self.config.mail):
             raise CollectionError('이번 요청의 DB·MBOX 선택과 추출 결과가 일치하지 않습니다.')
+
+    def finalize_download(self, root, archive, destination):
+        from .mail_import import build_local_catalog
         self.phase = 'Windows DB·메일 검색 색인 생성'
         self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
-        build_local_catalog(destination, self.config.username, self.checkpoint)
+        build_local_catalog(destination, self.config.username, self.checkpoint, self.log)
 
     def cleanup_remote(self):
         if self.job and self.csrf:
