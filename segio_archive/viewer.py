@@ -103,7 +103,9 @@ class Viewer:
                 relative = target.relative_to(owner.folder)
                 if ("attachments" in relative.parts or target.suffix.lower() == ".eml" or
                         relative.parts[:2] == ('mail', 'raw')):
-                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(target.name))
+                    inline = ('attachments' in relative.parts and mime in (
+                        'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'text/plain'))
+                    self.send_header("Content-Disposition", ("inline" if inline else "attachment") + "; filename*=UTF-8''" + quote(target.name))
                 else:
                     script = " script-src 'self' 'unsafe-inline';" if target == owner.folder / "index.html" else ""
                     connect = " connect-src 'self';" if owner.compact and target == owner.folder/'index.html' else ''

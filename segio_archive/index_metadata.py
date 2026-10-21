@@ -1,6 +1,7 @@
 """Read-only archive dates and approval categories, without capture-time guesses."""
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from datetime import datetime, timedelta, timezone
 import json
 
 CATEGORIES = {'completed':'완료문서', 'rejected':'반려문서', 'reference':'참조문서',
@@ -35,6 +36,31 @@ def body_date(body):
     parts = str(body or '').split('\n', 3)
     raw = parts[2] if len(parts)>2 else ''
     return raw if header_date(raw)[0]!='날짜 미상' else ''
+
+
+def approval_date(payload):
+    """SEGIO uses Unix seconds for document.wdate; never use completion/backup time."""
+    try:
+        raw = json.loads(payload) if isinstance(payload, str) else payload
+        value = raw.get('document', {}).get('wdate')
+        if value is None or isinstance(value, bool) or not str(value).strip():
+            raise ValueError()
+        value = str(value).strip()
+        local = timezone(timedelta(hours=9))
+        if value.isdigit():
+            if int(value) <= 0:
+                raise ValueError()
+            date = datetime.fromtimestamp(int(value), local)
+        else:
+            date = datetime.fromisoformat(value.replace(' KST', '+09:00'))
+            date = date.replace(tzinfo=local) if date.tzinfo is None else date.astimezone(local)
+        return date.strftime('%Y-%m-%d %H:%M:%S KST'), int(date.timestamp())
+    except (ValueError, TypeError, AttributeError, OverflowError, OSError):
+        return '기안일자 미상', None
+
+
+def item_date(kind, mail_date, payload):
+    return header_date(mail_date)[0] if kind == 'mail' else approval_date(payload)[0]
 
 
 def members(value):
@@ -92,7 +118,8 @@ class IndexMetadata:
         db.create_function('header_epoch',1,lambda value:header_date(value)[1],deterministic=True)
         db.create_function('approval_has',2,lambda value,key:int(key in self.categories(value)),deterministic=True)
         db.create_function('approval_label',1,lambda value:' · '.join(CATEGORIES[key] for key in self.categories(value)),deterministic=True)
-        self.order = "i.kind,CASE WHEN i.kind='mail' THEN header_epoch("+self.date_sql+") END DESC,i.rowid"
+        db.create_function('approval_epoch',1,lambda value:approval_date(value)[1],deterministic=True)
+        self.order = "i.kind,CASE WHEN i.kind='mail' THEN header_epoch("+self.date_sql+") ELSE approval_epoch("+self.payload_sql+") END DESC,i.rowid"
 
     def categories(self, payload):
         return approval_categories(payload,self.user,self.mapping)

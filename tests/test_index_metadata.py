@@ -9,7 +9,7 @@ import unittest
 
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import digest_file, search
-from segio_archive.index_metadata import approval_categories, header_date
+from segio_archive.index_metadata import approval_categories, approval_date, header_date
 from segio_archive.search_page import install_search_page
 from segio_archive.viewer import Viewer
 
@@ -28,10 +28,10 @@ class IndexMetadataTests(unittest.TestCase):
             db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY,payload TEXT)')
             db.execute('CREATE TABLE mail_dates (id TEXT PRIMARY KEY,header_date TEXT)')
             for identity, title, progress, extra in (
-                    ('1','완료 계약','완료',{'reference':'employee@@이름'}),
-                    ('2','반려 계약','rejected',{}),
+                    ('1','완료 계약','완료',{'reference':'employee@@이름','wdate':'1000000000'}),
+                    ('2','반려 계약','rejected',{'wdate':'1700000000'}),
                     ('3','수신 계약','999',{'doc_recv_uid':'employee','cdate':'1900000000'}),
-                    ('4','진행 계약','pending',{})):
+                    ('4','진행 계약','pending',{'wdate':'1600000000'})):
                 db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',
                            (identity,'approval',title,'결재 문서','내용','documents/'+identity+'/document.html'))
                 db.execute('INSERT INTO document_records VALUES (?,?)',
@@ -45,9 +45,16 @@ class IndexMetadataTests(unittest.TestCase):
                            (identity,'mail',title,json.dumps([folder]),'sender\nreceiver\n2030-01-01 backup',identity+'.html'))
                 db.execute('INSERT INTO mail_dates VALUES (?,?)',(identity,date))
             db.commit()
+        document_files=[]
+        for identity in ('1','2','3','4'):
+            name='documents/'+identity+'/document.html'
+            path=root/name
+            path.parent.mkdir(parents=True)
+            path.write_text('<!doctype html><meta charset="utf-8"><p>결재 문서</p>')
+            document_files.append(name)
         manifest={'format':'segio-db-html/1','user':'employee','finished_at':'2030-01-01T00:00:00Z',
                   'files':{name:digest_file(root/name) for name in
-                           ('index.html','catalog.sqlite3','mail/raw.mbox','mail/sources.json')}}
+                           ['index.html','catalog.sqlite3','mail/raw.mbox','mail/sources.json']+document_files}}
         (root/'manifest.json').write_text(json.dumps(manifest))
         return manifest
 
@@ -67,6 +74,13 @@ class IndexMetadataTests(unittest.TestCase):
                          header_date('Tue, 01 Jan 2002 10:30:00 +0900')[1])
         self.assertEqual(header_date('bad date'),('날짜 미상',None))
         self.assertEqual(header_date(''),('날짜 미상',None))
+
+    def test_draft_date_uses_wdate_not_completion_or_backup_time(self):
+        self.assertEqual(approval_date({'document':{'wdate':'1700000000'}}),
+                         ('2023-11-15 07:13:20 KST',1700000000))
+        self.assertEqual(approval_date({'document':{'wdate':'0','cdate':'1900000000'}}),
+                         ('기안일자 미상',None))
+        self.assertEqual(approval_date({'document':{'wdate':'2023-11-15 07:13:20'}})[1],1700000000)
 
     def test_queries_and_offline_chunks_preserve_sources_and_exclude_capture_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,6 +106,33 @@ class IndexMetadataTests(unittest.TestCase):
             self.assertEqual(digest_file(root/'mail/raw.mbox'),original['files']['mail/raw.mbox'])
             self.assertTrue(verify_archive(root)['ok'])
 
+    def test_latest_drafts_appear_on_first_page_in_api_and_static_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            manifest=self.fixture(root)
+            with closing(sqlite3.connect(root/'catalog.sqlite3')) as db:
+                for index in range(105):
+                    identity='extra-'+str(index)
+                    db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',
+                               (identity,'approval',identity,'결재','내용','documents/1/document.html'))
+                    db.execute('INSERT INTO document_records VALUES (?,?)',
+                               (identity,json.dumps({'document':{'wdate':1800000000+index}})))
+                db.commit()
+            manifest['files']['catalog.sqlite3']=digest_file(root/'catalog.sqlite3')
+            (root/'manifest.json').write_text(json.dumps(manifest))
+            install_search_page(root)
+            first=search(root,kind='approval')['items']
+            self.assertEqual(len(first),100)
+            self.assertEqual(first[0]['id'],'extra-104')
+            self.assertEqual(first[-1]['id'],'extra-5')
+            last=search(root,kind='approval',page=1)['items']
+            self.assertEqual(last[-1]['id'],'3')
+            self.assertEqual(last[-1]['date'],'기안일자 미상')
+            chunks=[]
+            for path in sorted((root/'search').glob('part-*.js')):
+                chunks.extend(json.loads(path.read_text()[len('window.archiveChunk='):-1]))
+            self.assertEqual([row[0] for row in chunks[:100]],[item['id'] for item in first])
+
     @unittest.skipUnless(BROWSER,'Chromium required')
     def test_browser_top_menus_header_dates_and_offline_search_match_http(self):
         from playwright.sync_api import sync_playwright,expect
@@ -115,6 +156,10 @@ class IndexMetadataTests(unittest.TestCase):
                                     page.route('**/index.html',lambda route:route.fulfill(
                                         content_type='text/html',body=html.replace("offline=location.protocol==='file:'",'offline=true')))
                                 page.goto(viewer.url)
+                                expect(page.locator('article h2').first).to_have_text('반려 계약')
+                                expect(page.locator('#date-label')).to_have_text('기안일자')
+                                expect(page.locator('.message-date').first).to_have_text('2023-11-15 07:13:20 KST')
+                                expect(page.locator('#reset')).to_have_count(0)
                                 page.get_by_role('button',name='반려문서 (1건)',exact=True).click()
                                 expect(page.locator('article')).to_have_count(1)
                                 expect(page.locator('article h2')).to_have_text('반려 계약')
@@ -133,8 +178,16 @@ class IndexMetadataTests(unittest.TestCase):
                                 page.locator('#q').fill('없는 제목')
                                 page.locator('#search-button').click()
                                 expect(page.locator('article')).to_have_count(0)
-                                page.locator('#reset').click()
+                                page.locator('#q').fill('')
+                                page.get_by_role('button',name='전체 메일 (3건)',exact=True).click()
+                                page.locator('#search-button').click()
                                 expect(page.locator('article')).to_have_count(3)
+                                page.locator('#q').fill('계약')
+                                for scope,total in (('',5),('approval',4),('mail',1)):
+                                    page.locator('#scope').select_option(scope)
+                                    page.locator('#search-button').click()
+                                    expect(page.locator('article')).to_have_count(total)
+                                    expect(page.locator('#summary')).to_contain_text(str(total)+'건')
                                 if offline:
                                     self.assertFalse(any('/api/search?' in url for url in requests))
                                 page.close()

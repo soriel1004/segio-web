@@ -133,7 +133,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
 <h1>{html.escape(title)}</h1><p>보낸 사람: {html.escape(sender)}<br>받는 사람: {html.escape(receiver)}<br>일시: {html.escape(date)}<br>메일함: {html.escape(source['name'])}</p>
 <pre>{html.escape(text)}</pre>'''
         if attachments:
-            body += '<h2>첨부</h2>' + ''.join(f'<p><a href="../../../{html.escape(a["path"], quote=True)}">{html.escape(a["name"])}</a></p>' for a in attachments)
+            body += '<h2>첨부</h2>' + ''.join(f'<p><a target="_blank" rel="noopener noreferrer" href="../../../{html.escape(a["path"], quote=True)}">{html.escape(a["name"])}</a></p>' for a in attachments)
         path = f'{directory}/document.html'
         write(path, body)
         items.append({'id': identity, 'kind': 'mail', 'title': title, 'folders': [source['name']],

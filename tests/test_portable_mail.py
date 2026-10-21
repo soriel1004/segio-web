@@ -154,7 +154,7 @@ class PortableMailTests(unittest.TestCase):
             self.assertTrue(verify_archive(root)['ok'])
 
     @unittest.skipUnless(BROWSER,'Real Chromium required')
-    def test_index_click_opens_mail_without_viewer_process_and_downloads_attachment(self):
+    def test_index_click_opens_mail_and_attachment_in_separate_tab(self):
         from playwright.sync_api import sync_playwright,expect
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()
@@ -180,15 +180,13 @@ class PortableMailTests(unittest.TestCase):
                                 self.assertEqual(page.locator('main img').evaluate('image=>image.complete && image.naturalWidth'),1)
                                 self.assertEqual(page.locator('body').evaluate('node=>getComputedStyle(node).fontSize'),'12px')
                                 link=page.get_by_role('link',name='../../CON.txt')
-                                if url.startswith('file:'):
-                                    # Chromium displays local text attachments directly;
-                                    # file links do not emit an HTTP download event.
+                                original_url=page.url
+                                with page.expect_popup() as opened:
                                     link.click()
-                                    expect(page.locator('body')).to_contain_text('SYNTHETIC_ATTACHMENT')
-                                    page.go_back()
-                                else:
-                                    with page.expect_download() as event:link.click()
-                                    self.assertEqual(Path(event.value.path()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
+                                popup=opened.value
+                                expect(popup.locator('body')).to_contain_text('SYNTHETIC_ATTACHMENT')
+                                self.assertEqual(page.url,original_url)
+                                popup.close()
                                 page.get_by_role('link',name='메일 목록',exact=True).click()
                                 expect(page.locator('#tab-mail')).to_have_attribute('aria-selected','true')
                                 expect(page.locator('article')).to_have_count(2)

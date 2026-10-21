@@ -144,7 +144,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
 
 def search(root: Path, query='', kind='', page=0, mailbox='', category=''):
     from .mail_folders import MailFolders
-    from .index_metadata import IndexMetadata, CATEGORIES, header_date
+    from .index_metadata import IndexMetadata, CATEGORIES, item_date
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
@@ -171,7 +171,7 @@ def search(root: Path, query='', kind='', page=0, mailbox='', category=''):
     from .portable_mail import page_path
     for row in rows:
         item=dict(zip(('id','kind','title','folder','html','folder_id','source_folder'),row[:7]))
-        item['date']=header_date(row[7])[0] if item['kind']=='mail' else ''
+        item['date']=item_date(item['kind'], row[7], row[8])
         item['date_raw']=row[7] if item['kind']=='mail' else ''
         item['categories']=meta.categories(row[8]) if item['kind']=='approval' else []
         if item['kind']=='approval':
@@ -216,7 +216,7 @@ def message_html(root, identity):
             if part.is_multipart():
                 continue
             if part.get_filename() or part.get_content_disposition() == 'attachment':
-                attachments.append(f'<p><a href="{identity}/attachment/{number}">{html.escape(header_text(part.get_filename()) or "첨부")}</a></p>')
+                attachments.append(f'<p><a target="_blank" rel="noopener noreferrer" href="{identity}/attachment/{number}">{html.escape(header_text(part.get_filename()) or "첨부")}</a></p>')
                 continue
             payload = part.get_payload(decode=True) or b''
             if part.get_content_type() == 'text/plain':

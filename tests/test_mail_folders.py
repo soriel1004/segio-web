@@ -94,7 +94,7 @@ class MailFolderTests(unittest.TestCase):
             with patch.object(Path,'open',guarded):
                 prepare_archive(root)
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/4')
+            self.assertEqual(updated['browser_index'],'offline-search/5')
             for name,info in previous.items():
                 self.assertEqual(digest_file(root/name),info)
             self.assertTrue(verify_archive(root)['ok'])
@@ -131,7 +131,8 @@ class MailFolderTests(unittest.TestCase):
                                 page.locator('#q').fill('업무 내용')
                                 page.locator('#q').press('Enter')
                                 expect(page.locator('article')).to_have_count(1)
-                                page.locator('#reset').click()
+                                page.locator('#q').fill('')
+                                page.locator('#search-button').click()
                                 page.get_by_role('button',name='연구 & 개발 (1건)',exact=True).click()
                                 expect(page.locator('article')).to_have_count(1)
                                 expect(page.locator('article h2')).to_have_text('연구 문서')

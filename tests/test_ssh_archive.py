@@ -77,7 +77,7 @@ class SSHArchiveTests(unittest.TestCase):
                 status,disposition,attachment=get(urljoin(item['html'],attachment_url))
                 self.assertEqual(status,200)
                 self.assertEqual(attachment,b'SYNTHETIC_ATTACHMENT')
-                self.assertTrue(disposition.startswith('attachment;'))
+                self.assertTrue(disposition.startswith('inline;'))
                 status,_,eml=get('mail/'+item['id']+'/original.eml')
                 self.assertEqual(status,200)
                 self.assertIn(b'Content-Type: multipart/mixed',eml)
@@ -108,7 +108,8 @@ class SSHArchiveTests(unittest.TestCase):
                         page.locator('#q').press('Enter')
                         expect(page.locator('article')).to_have_count(0)
                         expect(page.locator('#empty')).to_have_text('검색 결과가 없습니다.')
-                        page.locator('#reset').click()
+                        page.locator('#q').fill('')
+                        page.locator('#search-button').click()
                         expect(page.locator('article')).to_have_count(3)
                     finally:
                         browser.close()
