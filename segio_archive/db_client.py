@@ -449,6 +449,7 @@ class DBCollector(PreparedDBCollector):
             'db_connection_failed':'서버 작업기에서 PostgreSQL에 접속하지 못했습니다. 기존 DB 서비스와 로컬 소켓 경로를 확인하세요. [db_connection_failed]',
             'db_query_failed':'서버 결재 DB 조회를 완료하지 못했습니다. 관리자 진단을 실행하세요. [db_query_failed]',
             'db_snapshot_mismatch':'결재 DB 조회 건수와 추출 결과가 일치하지 않습니다. [db_snapshot_mismatch]',
+            'db_encoding_failed':'서버 결재 DB의 문자·파일명 인코딩을 처리하지 못했습니다. 최신 공용 tools를 설치하고 last-failure.json의 encoding·site 항목을 확인하세요. [db_encoding_failed]',
             'approval_user_not_found':'결재 DB에서 해당 직원의 프로필과 관련 문서를 찾지 못했습니다. 서버 연결 도구를 최신 버전으로 업데이트하세요. [approval_user_not_found]',
             'cell_data_missing':'서버의 셀 data 폴더가 없거나 작업기가 접근할 수 없습니다. [cell_data_missing]',
             'server_disk_full':'서버의 추출 작업용 디스크 공간이 부족합니다. [server_disk_full]',

@@ -26,6 +26,7 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
     'db_snapshot_mismatch', 'approval_user_not_found', 'cell_data_missing',
+    'db_encoding_failed',
     'mail_path_unconfigured', 'mail_path_missing_or_symlink', 'mail_changed_retry',
     'mail_unsafe_file', 'mail_unsafe_symlink', 'invalid_identity', 'invalid_metadata',
     'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
@@ -44,12 +45,32 @@ def failure_details(exc, stage):
         code = {errno.ENOSPC: 'server_disk_full', errno.EFBIG: 'server_file_too_large',
                 errno.EACCES: 'server_access_denied', errno.EPERM: 'server_access_denied',
                 errno.ENOENT: 'server_file_missing'}.get(number, 'export_failed')
+        if isinstance(exc, UnicodeError) and stage == 'database':
+            code = 'db_encoding_failed'
     # Never record exception text, paths, SQL, employee IDs or secrets.
     category = ('io' if isinstance(exc, (IOError, OSError)) else
                 'validation' if isinstance(exc, SafeError) else
                 'encoding' if isinstance(exc, UnicodeError) else 'unexpected')
-    return code, {'stage': stage, 'category': category,
+    diagnostic = {'stage': stage, 'category': category,
                   'errno': number if isinstance(number, int) else None}
+    if isinstance(exc, UnicodeError):
+        kinds = ('UnicodeEncodeError','UnicodeDecodeError','UnicodeTranslateError','UnicodeError')
+        kind = type(exc).__name__
+        diagnostic['exception_type'] = kind if kind in kinds else 'UnicodeError'
+        codec = getattr(exc,'encoding',None)
+        diagnostic['encoding'] = codec if codec in (
+            'ascii','utf-8','utf8','cp949','euc-kr','euc_kr','latin-1') else 'unknown'
+        trace = sys.exc_info()[2]
+        while trace is not None:
+            frame = trace.tb_frame
+            module = os.path.basename(frame.f_code.co_filename)
+            function = frame.f_code.co_name
+            if module == 'export_approval_db.py' and function in (
+                    'text','read_rows','local_file','image','attachment','freeze',
+                    'render_bundle','run_export','decode_display_markup','signature_data_uri'):
+                diagnostic['site'] = {'function':function,'line':trace.tb_lineno}
+            trace = trace.tb_next
+    return code, diagnostic
 
 
 class MailChanged(SafeError):

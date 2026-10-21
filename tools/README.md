@@ -1,8 +1,27 @@
 # 두 프로그램 공용 tools
 
-**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
+**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.3)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
+
+## 결재 DB 추출 단계의 encoding 오류
+
+Python 2.6의 ASCII 웹 데몬 환경에서 Unicode 한글 경로를 파일 API에 넘기면 `UnicodeEncodeError`가 발생할 수 있습니다. `db-native-paths-1`은 POSIX 파일명을 명시적인 바이트 경로로 처리하며 UTF-8·CP949 이름을 확인합니다. 셀 데이터 경로 밖의 파일은 거부하고, 동일한 표시 이름에 서로 다른 파일이 있으면 임의 선택하지 않습니다. 원본 첨부 바이트·DB 텍스트·인증 설정은 변경하지 않습니다.
+
+개인 로그인 방식은 **서버에 설치된 tools를 갱신**해야 적용됩니다. 다음은 root SSH에서 실행하는 v0.5.3 소스 묶음 설치 예입니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.5.3.zip \
+  -o "$TOOLS_DIR/segio-web-0.5.3.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.5.3.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.5.3/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+검사·설치 결과에 `Approval exporter revision: db-native-paths-1.`이 표시되는지 확인하고 **Windows에서 수집을 다시 실행**하세요. 그룹웨어 재부팅은 필요하지 않습니다. 기존 v0.5.2 Windows 프로그램도 수정된 서버 도구를 사용할 수 있습니다. 같은 오류가 반복되면 새로 생성된 `jobs/last-failure.json`을 확인합니다. 인코딩 오류는 문자셋·예외 종류·확인된 함수명·줄 번호만 추가로 기록하며 문서 내용·파일명·암호·예외 원문은 기록하지 않습니다.
 
 ## Windows 프로그램에 적용
 

@@ -50,6 +50,8 @@ def load_bundle(directory):
             raise BundleError('Unsupported shared tool protocol: ' + name)
     if b'__PRIVATE_ROOT__' not in contents['live_archive_bridge.php']:
         raise BundleError('Use the original live_archive_bridge.php template.')
+    if b'db-native-paths-1' not in contents['export_approval_db.py']:
+        raise BundleError('Unsupported approval exporter revision.')
     return contents
 
 
@@ -66,6 +68,7 @@ def main():
         return 1
     print('Shared tools OK: %d files; SSH archive /1 and employee login /1.' % len(contents))
     print('Worker control protocol: segio-worker-control/1; PHP bridge revision: php-runtime-3.')
+    print('Approval exporter revision: db-native-paths-1.')
     print('No server configuration, credentials, permissions or jobs changed.')
     print('This is a local bundle check, not a server login or DB connectivity test.')
     return 0

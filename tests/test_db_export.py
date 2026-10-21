@@ -1,5 +1,7 @@
 import json
 import base64
+import os
+import subprocess
 from html import escape
 from pathlib import Path
 import sys
@@ -14,6 +16,70 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'Legacy POSIX filename encodings')
+    def test_korean_native_paths_under_ascii_locale_and_ambiguous_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            upload=root/'cell/data/approval/upload'
+            upload.mkdir(parents=True)
+            name='한글+첨부.txt'
+            native=os.fsencode(upload)+b'/'+name.encode('cp949')
+            with open(native,'wb') as stream:stream.write(b'SYNTHETIC_EXACT_BYTES')
+            bundle=exporter.Bundle(str(root/'archive'),str(root/'cell'),'employee')
+            with patch.object(exporter.sys,'getfilesystemencoding',return_value='ascii'):
+                result=bundle.attachment({'no':'1','fname':name,'fpath':name},'1')
+                self.assertEqual((root/'archive'/result['path']).read_bytes(),b'SYNTHETIC_EXACT_BYTES')
+                self.assertEqual(bundle.local_file(name.encode('cp949'),upload=True),native)
+                from urllib.parse import quote_from_bytes
+                encoded='data/approval/upload/'+quote_from_bytes(name.encode('cp949'))
+                self.assertEqual(bundle.local_file(encoded,upload=True),native)
+                (upload/name).write_bytes(b'OTHER_FILE_SAME_DISPLAYED_NAME')
+                self.assertIsNone(bundle.local_file(name,upload=True))
+                self.assertIsNone(bundle.local_file('../../../../private.txt',upload=True))
+
+    @unittest.skipIf(os.name == 'nt', 'Legacy POSIX filename encodings')
+    def test_real_export_roundtrip_with_legacy_runtime_when_available(self):
+        from segio_archive.db_client import unpack_verified
+        from segio_archive.archive import verify_archive
+        runtimes=[sys.executable]
+        if os.environ.get('SEGIO_TEST_PYTHON26'):
+            runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])
+        for executable in runtimes:
+            with self.subTest(runtime=executable), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                environment=dict(os.environ,LC_ALL='C',PYTHONCOERCECLOCALE='0',PYTHONUTF8='0')
+                result=subprocess.run([executable,str(Path(__file__).parent/'legacy_export_fixture.py'),str(root)],
+                                      env=environment,capture_output=True,check=True)
+                summary=json.loads(result.stdout)
+                self.assertTrue(summary['ok'])
+                self.assertEqual(summary['attachments'],2)
+                target=root/'verified'
+                target.mkdir()
+                unpack_verified(root/'output/segio-employee.zip',target,'employee')
+                self.assertTrue(verify_archive(target)['ok'])
+                for number in range(2):
+                    self.assertEqual((target/('documents/1/attachments/%d.txt'%(number+1))).read_bytes(),
+                                     b'SYNTHETIC_ATTACHMENT_KEPT_EXACTLY_'+str(number).encode('ascii'))
+
+    def test_encoding_diagnostic_contains_no_document_fragments(self):
+        import live_export_worker as worker
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'private.csv'
+            source.write_text('context\n'+(b'PRIVATE_DB_TEXT_'+bytes([255])).hex()+'\n')
+            try:
+                exporter.read_rows(str(source))
+            except UnicodeError as exc:
+                code,diagnostic=worker.failure_details(exc,'database')
+            else:
+                self.fail('Invalid UTF-8 must not be silently rewritten')
+            self.assertEqual(code,'db_encoding_failed')
+            self.assertEqual(diagnostic['exception_type'],'UnicodeDecodeError')
+            self.assertEqual(diagnostic['encoding'],'utf-8')
+            self.assertEqual(diagnostic['site']['function'],'read_rows')
+            self.assertIsInstance(diagnostic['site']['line'],int)
+            self.assertNotIn('PRIVATE',json.dumps(diagnostic))
+            self.assertNotIn(str(source),json.dumps(diagnostic))
+
     def test_sqlstate_errors_are_specific_and_credentials_never_escape(self):
         cases = ((b'28P01', 'db_authentication_failed'), (b'42501', 'db_permission_denied'),
                  (b'42P01', 'db_schema_mismatch'), (b'42703', 'db_schema_mismatch'),

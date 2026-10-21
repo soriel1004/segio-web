@@ -95,6 +95,17 @@ def diagnose(root, username=None):
             checks['last_failure'] = {'code': code,
                 'stage': details.get('stage') if details.get('stage') in
                     ('initializing', 'server_request', 'database', 'mail', 'packing', 'hashing') else 'unknown'}
+            for field,allowed in (
+                    ('exception_type',('UnicodeEncodeError','UnicodeDecodeError','UnicodeTranslateError','UnicodeError')),
+                    ('encoding',('ascii','utf-8','utf8','cp949','euc-kr','euc_kr','latin-1','unknown'))):
+                if details.get(field) in allowed:
+                    checks['last_failure'][field] = details[field]
+            site = details.get('site')
+            if (isinstance(site,dict) and site.get('function') in
+                    ('text','read_rows','local_file','image','attachment','freeze','render_bundle',
+                     'run_export','decode_display_markup','signature_data_uri') and
+                    type(site.get('line')) is int and 0 < site['line'] < 1000000):
+                checks['last_failure']['site'] = {'function':site['function'],'line':site['line']}
     except (IOError, OSError, ValueError, SafeError):
         pass
     print(json.dumps(checks, sort_keys=True))

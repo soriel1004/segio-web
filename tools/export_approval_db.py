@@ -28,11 +28,12 @@ try:
     from HTMLParser import HTMLParser
     from urlparse import urlsplit, parse_qs
     from urllib import unquote, unquote_plus
+    unquote_to_bytes = unquote
     html_unescape = HTMLParser().unescape
 except ImportError:
     from html.parser import HTMLParser
     from html import unescape as html_unescape
-    from urllib.parse import urlsplit, parse_qs, unquote, unquote_plus
+    from urllib.parse import urlsplit, parse_qs, unquote, unquote_plus, unquote_to_bytes
 
 from export_schema_from_segio_config import (
     SafeError, read_config, discover_config, connection_settings, pgpass_escape)
@@ -40,6 +41,7 @@ from export_schema_from_segio_config import (
 PY2 = sys.version_info[0] == 2
 HERE = os.path.dirname(os.path.abspath(__file__))
 NULL = "__SEGIO_NULL__"
+EXPORTER_REVISION = 'db-native-paths-1'
 
 
 def text(value):
@@ -382,29 +384,58 @@ class Bundle:
         return path
 
     def local_file(self, reference, upload=False):
-        reference = text(reference)
+        # DB text is Unicode, but legacy POSIX files may have UTF-8 or CP949
+        # byte names while Python 2.6 runs under an ASCII daemon locale.
+        # Never let Python implicitly encode a Unicode filename using ASCII.
+        try:
+            reference = text(reference)
+        except UnicodeDecodeError:
+            try:
+                reference = reference.decode('cp949')
+            except UnicodeError:
+                return None
         parsed = urlsplit(reference)
         if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
             return None
         try:
-            value = unquote(parsed.path.encode("utf-8")).decode("utf-8") if PY2 else unquote(parsed.path)
+            encoded = unquote_to_bytes(parsed.path.encode('utf-8') if PY2 else parsed.path)
+            try:
+                value = encoded.decode('utf-8')
+            except UnicodeDecodeError:
+                value = encoded.decode('cp949')
         except UnicodeDecodeError:
             return None
         if value.startswith("/data/"):
             value = value[1:]
-        if value.startswith("data/"):
-            path = os.path.join(self.cell, value)
-        elif os.path.isabs(value):
-            path = value
-        elif upload and "/" not in value and "\\" not in value:
-            path = os.path.join(self.cell, "data/approval/upload", value)
-        else:
+        if not (value.startswith("data/") or os.path.isabs(value) or
+                (upload and "/" not in value and "\\" not in value)):
             return None
-        allowed = os.path.realpath(os.path.join(self.cell, "data/approval/upload" if upload else "data"))
-        resolved = os.path.realpath(path)
-        if not resolved.startswith(allowed + os.sep) or not os.path.isfile(resolved):
-            return None
-        return resolved
+        matches = {}
+        codecs = (None,) if os.name == 'nt' else (sys.getfilesystemencoding() or 'utf-8','utf-8','cp949')
+        for codec in codecs:
+            try:
+                cell = self.cell
+                native = value
+                data, uploads, separator = 'data', 'data/approval/upload', os.sep
+                if codec is not None:
+                    cell = cell if isinstance(cell,bytes) else cell.encode(codec)
+                    native = value.encode(codec)
+                    data, uploads, separator = data.encode('ascii'), uploads.encode('ascii'), os.sep.encode('ascii')
+                if value.startswith('data/'):
+                    path = os.path.join(cell,native)
+                elif os.path.isabs(value):
+                    path = native
+                else:
+                    path = os.path.join(cell,uploads,native)
+                allowed = os.path.realpath(os.path.join(cell,uploads if upload else data))
+                resolved = os.path.realpath(path)
+                if resolved.startswith(allowed+separator) and os.path.isfile(resolved):
+                    info = os.stat(resolved)
+                    matches[(info.st_dev,info.st_ino)] = resolved
+            except (UnicodeError, OSError, IOError):
+                continue
+        # Two different files for the same displayed name are ambiguous.
+        return next(iter(matches.values())) if len(matches)==1 else None
 
     def image(self, src):
         src = text(src)

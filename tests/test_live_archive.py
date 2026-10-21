@@ -135,7 +135,8 @@ class LiveWorkerTests(unittest.TestCase):
             create_fixture(root)
             for number, exception, code in (
                     (1, worker.SafeError('DO_NOT_LOG_DB_PASSWORD', 'db_permission_denied'), 'db_permission_denied'),
-                    (2, OSError(errno.ENOSPC, 'DO_NOT_LOG_MAIL_PATH'), 'server_disk_full')):
+                    (2, OSError(errno.ENOSPC, 'DO_NOT_LOG_MAIL_PATH'), 'server_disk_full'),
+                    (3, UnicodeEncodeError('ascii','DO_NOT_LOG_한글',11,13,'synthetic'), 'db_encoding_failed')):
                 job_id=f'{number:032x}'
                 job=root/'jobs'/job_id
                 job.mkdir()
