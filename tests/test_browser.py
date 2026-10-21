@@ -93,7 +93,7 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertEqual(app.user.get(), "")
                 self.assertEqual(app.password.get(), "")
                 self.assertEqual(app.method.get(), DB_MODE)
-                self.assertIn('192.168.0.100',app.server.get())
+                self.assertIn('lssgroup.co.kr',app.server.get())
                 self.assertFalse(hasattr(app,'method_box'))
                 self.assertTrue(app.approvals.get())
                 self.assertTrue(app.mail.get())

@@ -129,13 +129,17 @@ class App(tk.Tk):
         threading.Thread(target=self.worker, args=(config, password), daemon=True).start()
 
     def worker(self, config, password):
+        collector = None
         try:
             from .db_client import DBCollector
             collector = DBCollector(config, lambda s:self.events.put(('log',s)))
             path = collector.run(password)
             self.events.put(("done", path))
         except (CollectionError, BrowserUnavailable) as exc:
-            self.events.put(("error", str(exc)))
+            message = str(exc)
+            if getattr(collector,'failure_path',None):
+                message += '\n\n오류 기록: '+str(collector.failure_path)
+            self.events.put(("error", message))
         except Exception as exc:
             self.events.put(("error", f"시작 실패 ({type(exc).__name__}). 저장 폴더 권한과 설치 상태를 확인하세요."))
         finally:

@@ -216,7 +216,7 @@ class LoginBridgeTests(NativePHPFixture, unittest.TestCase):
             config.output = other_output
             with self.assertRaises(CollectionError):
                 DBCollector(config).run('wrong-password')
-            self.assertFalse(other_output.exists())
+            self.assertEqual({p.name for p in other_output.iterdir()},{'last-client-failure.json'})
             # A manual login with another account must not produce an archive
             # labelled as the requested employee.
             client = DBCollector(config)
@@ -229,7 +229,7 @@ class LoginBridgeTests(NativePHPFixture, unittest.TestCase):
             with patch('segio_archive.db_client.PreparedDBCollector.login', different_login):
                 with self.assertRaisesRegex(CollectionError, '실제 로그인 계정'):
                     client.run('unused')
-            self.assertFalse(other_output.exists())
+            self.assertEqual({p.name for p in other_output.iterdir()},{'last-client-failure.json'})
 
 
 @unittest.skipIf(sys.platform=='win32', 'POSIX server publisher')

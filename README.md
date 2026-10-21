@@ -1,14 +1,22 @@
-# 개인 SEGIO 로그인으로 자료 받기 · v0.5.3
+# 개인 SEGIO 로그인으로 자료 받기 · v0.5.4
 
-개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.3 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.3.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.3**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.4 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.4.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.4**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
 
-프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.3.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
+프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.4.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
 
 첫 화면은 **결재 문서·메일·암호화되지 않은 HTTP 연결 허용**만 기본 선택합니다. HTTPS 주소에서는 인증서 검증을 유지합니다. 개인 로그인 방식은 [서버 연결 기능](docs/WINDOWS_LOGIN.md)이 설치되어 있어야 하며, 서버에는 전송·검증용 임시 ZIP이 필요합니다. 내려받은 뒤 다시 ZIP을 만들거나 최종 ZIP을 추가 저장하지 않고 **백업 폴더만** 남깁니다. SSH 방식의 추가 ZIP도 기본 해제입니다.
 
-첫 화면은 **개인 SEGIO 로그인으로 자료 받기** 전용이며 가져오기 방식 목록을 표시하지 않습니다. 기본 서버는 `192.168.0.100`의 기존 로그인 경로이고, 계정 입력 이름은 **그룹웨어 ID·그룹웨어 암호**입니다.
+첫 화면은 **개인 SEGIO 로그인으로 자료 받기** 전용이며 가져오기 방식 목록을 표시하지 않습니다. 기본 서버는 `lssgroup.co.kr`의 기존 로그인 경로이고, 계정 입력 이름은 **그룹웨어 ID·그룹웨어 암호**입니다.
 
-서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.3 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.4 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+
+## 서버 응답 오류 기록
+
+v0.5.4는 Windows 프로그램을 갱신해 적용합니다. 기존 서버의 `db-native-paths-1` 도구는 그대로 사용할 수 있습니다. 접속 기본 주소는 `http://lssgroup.co.kr/icons/app/cms/?html=/home/login.html&shell=/index.shell:483`입니다.
+
+추출 대기 중 상태 조회가 시간 초과·연결 끊김·일부 HTTP 5xx/408/429 응답으로 실패하면 최대 두 번 재시도합니다. 추출을 시작하는 POST 요청은 재전송하지 않습니다. 로그인 화면이나 PHP 오류·PHP 소스 응답은 재시도하지 않고 표시합니다. JSON 형식과 로그인 사용자 검증은 유지합니다.
+
+오류가 나면 선택한 **Windows 저장 폴더의 `last-client-failure.json`**에 최초 오류 코드·요청 단계·HTTP 상태·응답 형식을 저장하고 팝업에 파일 위치를 표시합니다. 서버 작업 정리 후 서버 로그에 `cancelled`가 남아도 Windows 기록으로 원래 응답 오류를 확인할 수 있습니다. 캡처를 놓쳤다면 이 파일 내용을 보내세요. 응답 본문·쿠키·암호·직원 ID·URL·예외 원문은 기록하지 않습니다. 현재 정보만으로 운영 서버가 HTML을 반환한 정확한 원인을 확정한 것은 아닙니다.
 
 ## 대용량 메일함
 

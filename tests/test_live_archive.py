@@ -475,7 +475,7 @@ raise SystemExit(worker.main())
                 jobs = [p for p in (self.live_root/'jobs').iterdir() if p.is_dir() and p not in before]
                 self.assertEqual(len(jobs), 1)
                 self.assertEqual(json.loads((jobs[0]/'status.json').read_text())['state'], 'failed')
-                self.assertEqual(list(Path(tmp).iterdir()), [])
+                self.assertEqual({p.name for p in Path(tmp).iterdir()},{'last-client-failure.json'})
         finally:
             launcher.write_text(original)
             for job in (self.live_root/'jobs').iterdir():
@@ -607,7 +607,7 @@ raise SystemExit(worker.main())
                 with self.assertRaisesRegex(CollectionError, 'secure_random_unavailable') as caught:
                     DBCollector(config).run(PASSWORD)
                 self.assertNotIn('PRIVATE_WORKER_OUTPUT',str(caught.exception))
-                self.assertEqual(list(Path(tmp).iterdir()),[])
+                self.assertEqual({p.name for p in Path(tmp).iterdir()},{'last-client-failure.json'})
             saved=(self.live_root/'jobs/last-failure.json').read_bytes()
             self.assertEqual(json.loads(saved)['phase'],'secure_random_unavailable')
             self.assertEqual(json.loads(saved)['diagnostic']['stage'],'server_request')
@@ -633,7 +633,7 @@ raise SystemExit(worker.main())
                 with self.assertRaisesRegex(CollectionError, '서버 결재 DB 추출.*db_schema_mismatch') as caught:
                     DBCollector(config).run(PASSWORD)
                 self.assertNotIn('PRIVATE_DB_PASSWORD',str(caught.exception))
-                self.assertEqual(list(Path(tmp).iterdir()),[])
+                self.assertEqual({p.name for p in Path(tmp).iterdir()},{'last-client-failure.json'})
             self.assertFalse([p for p in (self.live_root/'jobs').iterdir() if p.is_dir()])
             saved=(self.live_root/'jobs/last-failure.json').read_bytes()
             self.assertEqual(json.loads(saved)['phase'],'db_schema_mismatch')
@@ -713,7 +713,7 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                     else:
                         with self.assertRaisesRegex(CollectionError,'실제 로그인 계정'):
                             client.run('')
-                        self.assertFalse(output.exists())
+                        self.assertEqual([item.name for item in output.iterdir()],['last-client-failure.json'])
 
     def test_service_config_error_reports_safe_checks_without_setting_values(self):
         config=self.live_root/'config.json'
@@ -802,6 +802,92 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                     browser.close()
             finally:
                 viewer.close()
+
+    def install_test_status_html(self, transient_errors):
+        router=self.root/'router.php'
+        original=router.read_text()
+        counter=self.root/'synthetic-status-count'
+        counter.unlink(missing_ok=True)
+        marker="$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);"
+        injected="""
+if ($path==='/segio/archive/live.php' && isset($_GET['action']) && $_GET['action']==='status') {
+    $counter=__DIR__.'/synthetic-status-count';
+    $count=is_file($counter)?(int)file_get_contents($counter):0;
+    $count++; file_put_contents($counter,(string)$count);
+    if (ERROR_COUNT<0 || $count<=ERROR_COUNT) {
+        header('HTTP/1.1 ERROR_STATUS',true,ERROR_STATUS);
+        header('Content-Type: text/html; charset=UTF-8');
+        echo '<html><body>PRIVATE_HTML_MUST_NEVER_BE_SAVED</body></html>'; return;
+    }
+}
+""".replace('ERROR_COUNT',str(transient_errors)).replace('ERROR_STATUS','200' if transient_errors<0 else '503')
+        self.assertIn(marker,original)
+        router.write_text(original.replace(marker,marker+injected,1))
+        return router,original,counter
+
+    def test_transient_html_status_recovers_without_resubmitting_export(self):
+        router,original,counter=self.install_test_status_html(2)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                messages=[]
+                client=DBCollector(config,messages.append)
+                with patch.object(client,'live_call',wraps=client.live_call) as calls:
+                    result=client.run(PASSWORD)
+                self.assertEqual(sum(call.args[0]=='start' for call in calls.call_args_list),1)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),self.original)
+                self.assertEqual(sum('재시도' in message for message in messages),2)
+                self.assertFalse((Path(tmp)/'last-client-failure.json').exists())
+        finally:
+            router.write_text(original)
+            counter.unlink(missing_ok=True)
+
+    def test_client_html_error_survives_server_cleanup_cancellation(self):
+        import time
+        router,original_router,counter=self.install_test_status_html(-1)
+        launcher=self.live_root/'worker.py'
+        original_worker=launcher.read_text()
+        saved=self.live_root/'jobs/last-failure.json'
+        original_failure=saved.read_bytes() if saved.exists() else None
+        saved.unlink(missing_ok=True)
+        client=None
+        try:
+            launcher.write_text(original_worker.replace('worker.run_export=synthetic_export',
+                "def delayed(*args,**kwargs):\n    result=synthetic_export(*args,**kwargs)\n    __import__('time').sleep(1)\n    return result\nworker.run_export=delayed"))
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                client=DBCollector(config)
+                with self.assertRaisesRegex(CollectionError,'BRIDGE_NOT_JSON') as caught:
+                    client.run(PASSWORD)
+                self.assertNotIn('PRIVATE_HTML',str(caught.exception))
+                record=Path(tmp)/'last-client-failure.json'
+                original_record=record.read_bytes()
+                value=json.loads(original_record)
+                self.assertEqual(value['error'],'BRIDGE_NOT_JSON')
+                self.assertEqual(value['response']['action'],'status')
+                self.assertEqual(value['response']['http_status'],200)
+                self.assertEqual(value['response']['content_type'],'text/html')
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline:
+                    if saved.exists() and not (self.live_root/'jobs'/client.job/'work').exists():break
+                    time.sleep(.05)
+                self.assertEqual(json.loads(saved.read_bytes())['phase'],'cancelled')
+                self.assertEqual(record.read_bytes(),original_record)
+                self.assertEqual({path.name for path in Path(tmp).iterdir()},{'last-client-failure.json'})
+                for secret in ('PRIVATE_HTML','employee',client.job,PASSWORD,str(self.live_root)):
+                    self.assertNotIn(secret,record.read_text())
+        finally:
+            router.write_text(original_router)
+            launcher.write_text(original_worker)
+            counter.unlink(missing_ok=True)
+            if client and client.job:shutil.rmtree(self.live_root/'jobs'/client.job,ignore_errors=True)
+            if original_failure is not None:saved.write_bytes(original_failure)
+            else:saved.unlink(missing_ok=True)
 
     def test_start_requires_csrf_and_rejects_other_account_job_access(self):
         opener=self.logged_in()

@@ -25,6 +25,7 @@ from urllib.parse import urlencode, urljoin
 from .browser import BrowserUnavailable, launch_browser
 from .archive import safe_name
 from .web import Collector, CollectionError, Config, origin
+from .client_diagnostics import BridgeResponseError, response_summary, write_failure
 
 BRIDGE = "/segio/archive/bridge.php"
 PROTOCOL = "segio-login-archive/1"
@@ -195,6 +196,7 @@ class PreparedDBCollector(Collector):
     def __init__(self, config: Config, log=lambda _: None):
         super().__init__(config, log)
         self.phase = '시작'
+        self.failure_path = None
         self.user_agent = None
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
             raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
@@ -239,6 +241,13 @@ class PreparedDBCollector(Collector):
 
     def cleanup_remote(self):
         pass
+
+    def record_failure(self, exception):
+        try:
+            self.failure_path = write_failure(self.config.output,exception,self.phase)
+            self.log('오류 기록: '+str(self.failure_path))
+        except OSError:
+            self.log('오류 기록을 저장하지 못했습니다. 저장 폴더 권한과 공간을 확인하세요.')
 
     def receive(self, record):
         self.phase = '다운로드 저장 폴더 준비'
@@ -345,11 +354,14 @@ class PreparedDBCollector(Collector):
                     except Exception:
                         pass
                     self.context = self.page = self.browser = None
-        except (CollectionError, BrowserUnavailable):
+        except (CollectionError, BrowserUnavailable) as exc:
+            self.record_failure(exc)
             raise
         except Exception as exc:
             # Playwright/urllib errors can contain session URLs and cookies.
-            raise processing_error(exc, self.phase) from None
+            error = processing_error(exc,self.phase)
+            self.record_failure(error)
+            raise error from None
         finally:
             password = ''
 
@@ -389,16 +401,26 @@ class DBCollector(PreparedDBCollector):
                     return None
                 raise CollectionError('로그인 확인 주소가 다른 서버로 이동합니다. 실제 SEGIO 서버 주소를 확인하세요. [LOGIN_ORIGIN_MISMATCH]')
             body = response.body()
+            diagnostic = response_summary(action,response.status,response.headers.get('content-type',''),body)
             if len(body)>65536:
-                raise CollectionError('서버 추출 응답이 너무 큽니다. 연결 주소와 PHP 실행 상태를 확인하세요. [BRIDGE_RESPONSE_TOO_LARGE]')
-            if 'application/json' not in response.headers.get('content-type',''):
+                raise BridgeResponseError('서버 추출 응답이 너무 큽니다. 연결 주소와 PHP 실행 상태를 확인하세요.',
+                                          'BRIDGE_RESPONSE_TOO_LARGE',diagnostic)
+            if diagnostic['content_type']!='application/json':
                 if pending_login and response.status==200 and re.search(rb'<input\b[^>]*\btype\s*=\s*[\'"]?password\b',body,re.I):
                     return None
-                raise CollectionError('서버 연결 주소가 JSON 대신 HTML 또는 다른 응답을 반환했습니다. live.php의 PHP 실행·인증 연결을 확인하세요. [BRIDGE_NOT_JSON]')
+                if diagnostic['body_kind']=='php_source':
+                    raise BridgeResponseError('서버가 PHP 실행 결과 대신 PHP 소스를 반환했습니다. 서버의 PHP 실행 설정을 확인하세요.',
+                                              'BRIDGE_PHP_SOURCE',diagnostic)
+                if diagnostic['body_kind']=='login_form':
+                    raise BridgeResponseError('서버가 로그인 화면을 반환했습니다. 접속 주소와 그룹웨어 로그인 상태를 확인하고 다시 로그인하세요.',
+                                              'BRIDGE_LOGIN_REQUIRED',diagnostic)
+                raise BridgeResponseError('서버 연결 주소가 JSON 대신 HTML 또는 다른 응답을 반환했습니다. 서버의 PHP 실행·인증 연결을 확인하세요.',
+                                          'BRIDGE_NOT_JSON',diagnostic)
             try:
                 value = json.loads(body)
             except (ValueError,UnicodeError):
-                raise CollectionError('서버 연결 기능이 올바른 JSON을 반환하지 않았습니다. PHP 오류와 설정 파일 접근 상태를 확인하세요. [BRIDGE_INVALID_JSON]') from None
+                raise BridgeResponseError('서버 연결 기능이 올바른 JSON을 반환하지 않았습니다. PHP 오류와 설정 파일 접근 상태를 확인하세요.',
+                                          'BRIDGE_INVALID_JSON',diagnostic) from None
             if isinstance(value,dict) and value.get('protocol')==LIVE_PROTOCOL and value.get('error'):
                 if pending_login and value['error']=='native_login_required':
                     return None
@@ -493,6 +515,26 @@ class DBCollector(PreparedDBCollector):
             self.page.wait_for_timeout(250)
         raise CollectionError('로그인 응답 뒤 서버가 본인 인증을 확인하지 못했습니다. live.php의 인증 전달과 서버 주소를 확인하세요. [LOGIN_NOT_CONFIRMED]')
 
+    def poll_status(self):
+        """Retry only read-only status requests for explicit transient failures."""
+        from playwright.sync_api import Error, TimeoutError as BrowserTimeout
+        for attempt in range(3):
+            self.checkpoint()
+            try:
+                return self.live_call('status')
+            except Exception as exc:
+                transient = isinstance(exc,(BrowserTimeout,TimeoutError,ConnectionError))
+                if isinstance(exc,Error) and re.search(r'\b(?:ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ECONNRESET)\b',str(exc)):
+                    transient = True
+                if isinstance(exc,BridgeResponseError):
+                    data = exc.diagnostic
+                    transient = data['http_status'] in (408,429,500,502,503,504) and data['body_kind'] not in ('login_form','php_error','php_source')
+                if not transient or attempt==2:
+                    raise
+                self.log('서버 상태 조회의 일시적인 오류로 재시도합니다. (%d/2)'%(attempt+1))
+                if self.config.cancel.wait(attempt+1):
+                    self.checkpoint()
+
     def info(self):
         info = self.live_call('info')
         if not re.fullmatch(r'[a-f0-9]{64}',str(info.get('csrf',''))):
@@ -510,7 +552,7 @@ class DBCollector(PreparedDBCollector):
         deadline = time.monotonic()+72*3600
         while time.monotonic()<deadline:
             self.checkpoint()
-            status = self.live_call('status')
+            status = self.poll_status()
             if status.get('job')!=self.job:
                 raise CollectionError('서버 작업 번호가 일치하지 않습니다.')
             phase = status.get('phase')
