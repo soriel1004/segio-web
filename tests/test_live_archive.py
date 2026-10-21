@@ -71,6 +71,25 @@ raise SystemExit(worker.main())
 
 
 class LiveWorkerTests(unittest.TestCase):
+    def test_control_random_response_keeps_plain_cli_compatible_and_requires_os_entropy(self):
+        import subprocess
+        responses = [json.loads(subprocess.check_output([sys.executable,
+            str(ROOT/'tools/live_export_worker.py'), '--random-token', '--bridge-control']))
+            for _ in range(2)]
+        for value in responses:
+            self.assertEqual(value['protocol'], 'segio-worker-control/1')
+            self.assertEqual(value['operation'], 'random-token')
+            self.assertIs(value['ok'], True)
+            self.assertRegex(value['token'], r'\A[0-9a-f]{32}\Z')
+        self.assertNotEqual(responses[0]['token'], responses[1]['token'])
+        from io import StringIO
+        output = StringIO()
+        with patch.object(worker.sys, 'argv', ['worker', '--random-token', '--bridge-control']), \
+             patch.object(worker.os, 'urandom', side_effect=OSError('unavailable')), \
+             patch('sys.stdout', output):
+            self.assertEqual(worker.main(), 1)
+        self.assertEqual(output.getvalue(), '')
+
     def test_random_token_helper_uses_os_entropy_without_starting_a_job(self):
         import subprocess
         tokens=[subprocess.check_output([sys.executable, str(ROOT/'tools/live_export_worker.py'), '--random-token'])
@@ -303,6 +322,122 @@ class LiveInstallationTests(unittest.TestCase):
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
 
+    def unavailable_child_status(self, text):
+        text = text.replace('proc_get_status($process)', 'test_unavailable_status($process)')
+        text = text.replace('proc_close($process)', 'test_unavailable_close($process)')
+        return text.replace('function new_job_id(', '''
+function test_unavailable_status($process) {
+    $status=proc_get_status($process);
+    if (!$status['running']) $status['exitcode']=-1;
+    return $status;
+}
+function test_unavailable_close($process) { proc_close($process); return -1; }
+function new_job_id(''')
+
+    def test_missing_both_exit_statuses_uses_explicit_ack_for_random_and_detach(self):
+        bridge = self.root/'live.php'
+        original = bridge.read_text()
+        text = self.unavailable_child_status(original)
+        text = text.replace("function_exists('random_bytes')", 'false')
+        text = text.replace("@fopen('/dev/urandom','rb')", "@fopen(__DIR__.'/missing-random','rb')")
+        text = text.replace("function_exists('openssl_random_pseudo_bytes')", 'false')
+        try:
+            bridge.write_text(text)
+            opener = self.logged_in()
+            with opener.open(self.url+'/segio/archive/live.php?action=diagnostic', timeout=5) as response:
+                payload = response.read()
+            value = json.loads(payload)
+            self.assertEqual(value['worker']['state'], 'acknowledged_exit_unavailable')
+            self.assertEqual(value['worker']['exit_code'], -1)
+            self.assertTrue(value['worker']['acknowledged'])
+            self.assertFalse(value['worker']['exit_status_confirmed'])
+            self.assertNotIn(b'"token"', payload)
+            with tempfile.TemporaryDirectory() as tmp:
+                config = Config(self.url+'/', 'employee', Path(tmp), mail=True, pdf=False,
+                    allow_http=True, headless=True, timeout_ms=10000,
+                    browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                result = DBCollector(config).run(PASSWORD)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(), self.original)
+        finally:
+            bridge.write_text(original)
+
+    def test_unknown_exit_rejects_plain_tokens_bad_ack_and_stderr(self):
+        bridge, launcher = self.root/'live.php', self.live_root/'worker.py'
+        original_bridge, original_worker = bridge.read_text(), launcher.read_bytes()
+        good = {'protocol': 'segio-worker-control/1', 'operation': 'random-token', 'ok': True, 'token': 'f'*32}
+        cases = [('plain', 'f'*32, ''),
+                 ('bad_protocol', json.dumps(dict(good, protocol='unknown')), ''),
+                 ('bad_operation', json.dumps(dict(good, operation='detach')), ''),
+                 ('bad_token', json.dumps(dict(good, token='bad')), ''),
+                 ('error', json.dumps(dict(good, ok=False)), ''),
+                 ('stderr', json.dumps(good), 'PRIVATE_RUNTIME_STDERR')]
+        try:
+            bridge.write_text(self.unavailable_child_status(original_bridge))
+            opener = self.logged_in()
+            for label, output, stderr in cases:
+                with self.subTest(label=label):
+                    launcher.write_text('import sys\nprint(%r)\nsys.stderr.write(%r)\n' % (output, stderr))
+                    with opener.open(self.url+'/segio/archive/live.php?action=diagnostic', timeout=5) as response:
+                        payload = response.read()
+                    value = json.loads(payload)
+                    self.assertEqual(value['worker']['state'], 'exit_status_unavailable')
+                    self.assertFalse(value['worker']['acknowledged'])
+                    self.assertNotIn(b'PRIVATE_RUNTIME_STDERR', payload)
+                    self.assertNotIn(b'f'*32, payload)
+        finally:
+            bridge.write_text(original_bridge)
+            launcher.write_bytes(original_worker)
+
+    def test_known_failed_exit_is_rejected_even_with_a_valid_control_response(self):
+        launcher = self.live_root/'worker.py'
+        original = launcher.read_bytes()
+        try:
+            ack = {'protocol': 'segio-worker-control/1', 'operation': 'random-token', 'ok': True, 'token': 'f'*32}
+            launcher.write_text('print(%r)\nraise SystemExit(2)\n' % json.dumps(ack))
+            opener = self.logged_in()
+            with opener.open(self.url+'/segio/archive/live.php?action=diagnostic', timeout=5) as response:
+                value = json.load(response)
+            self.assertEqual(value['worker']['state'], 'worker_exit_failed')
+            self.assertEqual(value['worker']['exit_code'], 2)
+            self.assertFalse(value['worker']['acknowledged'])
+            self.assertTrue(value['worker']['exit_status_confirmed'])
+        finally:
+            launcher.write_bytes(original)
+
+    def test_detach_ack_must_match_the_requested_job(self):
+        launcher = self.live_root/'worker.py'
+        original = launcher.read_text()
+        before = set((self.live_root/'jobs').iterdir())
+        replacement = '''
+if '--detach' in sys.argv:
+    import json
+    print(json.dumps({'protocol':'segio-worker-control/1','operation':'detach','ok':True,'job':'WRONG_JOB'}))
+    raise SystemExit(0)
+raise SystemExit(worker.main())
+'''
+        try:
+            launcher.write_text(original.replace('raise SystemExit(worker.main())', replacement))
+            with tempfile.TemporaryDirectory() as tmp:
+                config = Config(self.url+'/', 'employee', Path(tmp), mail=True, pdf=False,
+                    allow_http=True, headless=True, timeout_ms=10000,
+                    browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                with self.assertRaises(CollectionError) as caught:
+                    DBCollector(config).run(PASSWORD)
+                self.assertEqual(str(caught.exception), DBCollector.error_message('export_process_unavailable'))
+                failure = json.loads((self.live_root/'jobs/last-failure.json').read_text())
+                self.assertEqual(failure['phase'], 'export_process_unavailable')
+                self.assertEqual(failure['diagnostic']['runtime']['state'], 'invalid_acknowledgement')
+                jobs = [p for p in (self.live_root/'jobs').iterdir() if p.is_dir() and p not in before]
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(json.loads((jobs[0]/'status.json').read_text())['state'], 'failed')
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+        finally:
+            launcher.write_text(original)
+            for job in (self.live_root/'jobs').iterdir():
+                if job.is_dir() and job not in before:
+                    shutil.rmtree(job)
+
     def test_cached_process_status_survives_proc_close_minus_one(self):
         bridge = self.root/'live.php'
         original = bridge.read_text()
@@ -345,7 +480,7 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
             with opener.open(url, timeout=5) as response:
                 body = response.read()
             value = json.loads(body)
-            self.assertEqual(value['bridge_revision'], 'php-runtime-2')
+            self.assertEqual(value['bridge_revision'], 'php-runtime-3')
             self.assertEqual(value['worker']['state'], 'worker_exit_failed')
             self.assertEqual(value['worker']['exit_code'], 2)
             self.assertTrue(value['worker']['stderr_present'])
@@ -384,7 +519,9 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
                 value = json.load(response)
             self.assertEqual(value['worker']['state'], 'ok')
             self.assertEqual(value['worker']['exit_code'], 0)
-            self.assertEqual(value['worker']['output_bytes'], 33)
+            self.assertTrue(value['worker']['acknowledged'])
+            self.assertTrue(value['worker']['exit_status_confirmed'])
+            self.assertGreater(value['worker']['output_bytes'], 33)
         finally:
             bridge.write_text(original)
 

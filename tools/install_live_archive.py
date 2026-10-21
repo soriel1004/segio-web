@@ -82,6 +82,7 @@ def install(web_user, config, root=None, mail_template=None):
     body = bundle['live_archive_bridge.php'].replace(b'__PRIVATE_ROOT__', literal.encode('utf-8'))
     atomic_file(endpoint, body, account.pw_gid, 0o644)
     print('Installed live employee DB/MBOX export: /segio/archive/live.php')
+    print('PHP bridge revision: php-runtime-3; worker control: segio-worker-control/1.')
     print('Private configuration: ' + path)
     print('Mail template: ' + settings['mail_template'])
     print('No employee archive was prepared. Windows login starts a fresh job.')

@@ -32,17 +32,21 @@ function problem($status, $code) {
 }
 function public_worker_result($result) {
     $public=array();
-    foreach(array('state','exit_code','output_bytes','stderr_present') as $name)
+    foreach(array('state','exit_code','output_bytes','stderr_present','acknowledged','exit_status_confirmed') as $name)
         if (isset($result[$name])) $public[$name]=$result[$name];
     return $public;
 }
-function run_fixed_worker($config, $root, $arguments, $require_token) {
+function worker_acknowledged($result) {
+    return $result['state']==='ok' || $result['state']==='acknowledged_exit_unavailable';
+}
+function run_fixed_worker($config, $root, $arguments, $require_token, $expected_job=null) {
     $result=array('state'=>'process_unavailable','exit_code'=>null,
-                  'output_bytes'=>0,'stderr_present'=>false);
+                  'output_bytes'=>0,'stderr_present'=>false,'acknowledged'=>false,'exit_status_confirmed'=>false);
     foreach(array('proc_open','proc_close','proc_get_status','proc_terminate',
                   'stream_set_blocking','stream_get_contents','escapeshellarg','usleep') as $name)
         if (!function_exists($name)) return $result;
     $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']);
+    $arguments[]='--bridge-control';
     foreach($arguments as $argument) $command.=' '.escapeshellarg($argument);
     $pipes=array();
     $process=@proc_open($command,array(0=>array('pipe','r'),1=>array('pipe','w'),2=>array('pipe','w')),$pipes,$root);
@@ -60,7 +64,7 @@ function run_fixed_worker($config, $root, $arguments, $require_token) {
     $output=''; $exit=null; $finished=false; $deadline=microtime(true)+15.0;
     do {
         if ($nonblocking) {
-            $chunk=stream_get_contents($pipes[1],65-strlen($output));
+            $chunk=stream_get_contents($pipes[1],513-strlen($output));
             if (is_string($chunk)) $output.=$chunk;
             $error=stream_get_contents($pipes[2],4096);
             if (is_string($error) && strlen($error)) $result['stderr_present']=true;
@@ -70,12 +74,12 @@ function run_fixed_worker($config, $root, $arguments, $require_token) {
             // PHP <= 8.2 can consume the exit status here. Cache it before close.
             $exit=$status['exitcode']; $finished=true; break;
         }
-        if (strlen($output)>=65 || microtime(true)>=$deadline) break;
+        if (strlen($output)>=513 || microtime(true)>=$deadline) break;
         usleep(10000);
     } while (true);
     if (!$finished) @proc_terminate($process);
-    if (($finished || $nonblocking) && strlen($output)<65) {
-        $chunk=stream_get_contents($pipes[1],65-strlen($output));
+    if (($finished || $nonblocking) && strlen($output)<513) {
+        $chunk=stream_get_contents($pipes[1],513-strlen($output));
         if (is_string($chunk)) $output.=$chunk;
     }
     if ($finished || $nonblocking) {
@@ -87,13 +91,29 @@ function run_fixed_worker($config, $root, $arguments, $require_token) {
     if ($exit===null || $exit<0) $exit=$closed;
     $result['exit_code']=$exit;
     $result['output_bytes']=strlen($output);
-    if (!$finished) $result['state']=strlen($output)>=65?'output_limit':'timeout';
-    elseif ($exit===-1) $result['state']='exit_status_unavailable';
-    elseif ($exit!==0) $result['state']='worker_exit_failed';
-    elseif ($require_token && !preg_match('/\A[0-9a-f]{32}\r?\n?\z/',$output)) $result['state']='invalid_token';
+    $result['exit_status_confirmed']=$finished && $exit>=0;
+    $response=json_decode($output,true);
+    $valid=is_array($response) && isset($response['protocol'],$response['operation'],$response['ok']) &&
+        $response['protocol']==='segio-worker-control/1' && $response['ok']===true;
+    if ($require_token) {
+        $valid=$valid && $response['operation']==='random-token' && isset($response['token']) &&
+            is_string($response['token']) && preg_match('/\A[0-9a-f]{32}\z/',$response['token']);
+    } else {
+        $valid=$valid && $response['operation']==='detach' && isset($response['job']) &&
+            $response['job']===$expected_job;
+    }
+    if (!$finished) $result['state']=strlen($output)>=513?'output_limit':'timeout';
+    elseif ($exit!==0 && $exit!==-1) $result['state']='worker_exit_failed';
+    elseif (!$valid) $result['state']=$exit===-1?'exit_status_unavailable':'invalid_acknowledgement';
+    elseif ($exit===-1 && $result['stderr_present']) $result['state']='exit_status_unavailable';
     else {
-        $result['state']='ok';
-        if ($require_token) $result['token']=trim($output);
+        // Some embedded runtimes reap children before PHP observes their exit.
+        // Keep -1 visible; accept only the fixed helper's explicit protocol ACK.
+        // A random-token ACK proves OS entropy was read; detach ACK means only
+        // the job was spawned, not that its export completed successfully.
+        $result['state']=$exit===0?'ok':'acknowledged_exit_unavailable';
+        $result['acknowledged']=true;
+        if ($require_token) $result['token']=$response['token'];
     }
     return $result;
 }
@@ -117,7 +137,7 @@ function new_job_id($config, $root) {
     // installed worker for OS entropy, using fixed arguments and no secrets.
     global $runtime_failure;
     $result=run_fixed_worker($config,$root,array('--random-token'),true);
-    if ($result['state']!=='ok') {
+    if (!worker_acknowledged($result)) {
         $runtime_failure=public_worker_result($result);
         problem(503,'secure_random_unavailable');
     }
@@ -178,7 +198,7 @@ $hour=(int)floor(time()/3600);
 $csrf=hash_hmac('sha256',$uid.'|'.$hour,$config['csrf_secret']);
 if ($action==='diagnostic') {
     $probe=run_fixed_worker($config,$root,array('--random-token'),true);
-    answer(200,array('protocol'=>'segio-live-archive/1','bridge_revision'=>'php-runtime-2',
+    answer(200,array('protocol'=>'segio-live-archive/1','bridge_revision'=>'php-runtime-3',
         'checks'=>array('proc_open'=>function_exists('proc_open'),
             'proc_close'=>function_exists('proc_close'),
             'proc_get_status'=>function_exists('proc_get_status'),
@@ -228,8 +248,8 @@ if ($action==='start') {
     save_object($job.'/request.json',array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time()));
     save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued','phase'=>'queued'));
     flock($gate,LOCK_UN); fclose($gate);
-    $started=run_fixed_worker($config,$root,array('--config',$root.'/config.json','--job',$id,'--detach'),false);
-    if ($started['state']!=='ok') {
+    $started=run_fixed_worker($config,$root,array('--config',$root.'/config.json','--job',$id,'--detach'),false,$id);
+    if (!worker_acknowledged($started)) {
         $runtime_failure=public_worker_result($started);
         save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'failed','phase'=>'export_process_unavailable'));
         problem(503,'export_process_unavailable');

@@ -43,7 +43,9 @@ def load_bundle(directory):
         contents[name] = body
     for name, protocol in (('remote_ssh_export.py', b'segio-ssh-archive/1'),
                            ('live_export_worker.py', b'segio-live-archive/1'),
-                           ('live_archive_bridge.php', b'segio-live-archive/1')):
+                           ('live_archive_bridge.php', b'segio-live-archive/1'),
+                           ('live_export_worker.py', b'segio-worker-control/1'),
+                           ('live_archive_bridge.php', b'segio-worker-control/1')):
         if protocol not in contents[name]:
             raise BundleError('Unsupported shared tool protocol: ' + name)
     if b'__PRIVATE_ROOT__' not in contents['live_archive_bridge.php']:
@@ -63,6 +65,7 @@ def main():
         print(str(exc), file=sys.stderr)
         return 1
     print('Shared tools OK: %d files; SSH archive /1 and employee login /1.' % len(contents))
+    print('Worker control protocol: segio-worker-control/1; PHP bridge revision: php-runtime-3.')
     print('No server configuration, credentials, permissions or jobs changed.')
     print('This is a local bundle check, not a server login or DB connectivity test.')
     return 0

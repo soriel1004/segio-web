@@ -44,7 +44,7 @@ python ./install_live_archive.py --web-user segio \
 
 ## Python 진단은 정상인데 secure_random_unavailable이 계속될 때
 
-서버의 웹 계정에서 Python을 직접 실행하는 검사와 네이티브 PHP가 Python을 실행하는 검사는 다릅니다. 새 도구의 PHP 연결기는 프로세스 종료 코드를 읽은 뒤 보존하며, 출력을 제한하고 작업기 응답을 최대 15초 기다립니다. 종료 코드가 실패이거나 확인되지 않는 경우는 성공으로 처리하지 않습니다.
+서버의 웹 계정에서 Python을 직접 실행하는 검사와 네이티브 PHP가 Python을 실행하는 검사는 다릅니다. 새 도구의 PHP 연결기는 프로세스 종료 코드를 읽은 뒤 보존하며, 출력을 제한하고 작업기 응답을 최대 15초 기다립니다. 확인된 실패 종료 코드는 계속 거부합니다. 종료 코드가 확인되지 않는 환경에서는 새 작업기의 구조화된 응답(`segio-worker-control/1`)을 검사합니다. 난수는 OS 난수 생성 성공 응답을, 수집 시작은 요청한 작업 번호와 일치하는 접수 응답을 요구합니다. 종료 코드 `-1`은 진단에 그대로 남기며 작업 접수를 수집 완료로 간주하지 않습니다.
 
 서버 설치를 새 묶음으로 갱신한 뒤 수집을 다시 실행하세요. 계속 실패하면 **기존 SEGIO에 로그인한 브라우저**에서 로그인 주소와 같은 서버의 다음 경로를 엽니다.
 
@@ -52,8 +52,14 @@ python ./install_live_archive.py --web-user segio \
 /segio/archive/live.php?action=diagnostic
 ```
 
-예를 들어 사내 주소는 `http://192.168.0.100/segio/archive/live.php?action=diagnostic`입니다. 이 응답의 `bridge_revision`은 `php-runtime-2`여야 합니다. `unknown_action`이면 이전 PHP 연결기가 서비스 중이거나 갱신한 서버와 접속한 서버가 다른지 확인합니다.
+예를 들어 사내 주소는 `http://192.168.0.100/segio/archive/live.php?action=diagnostic`입니다. 이 응답의 `bridge_revision`은 `php-runtime-3`여야 합니다. `unknown_action`이면 이전 PHP 연결기가 서비스 중이거나 갱신한 서버와 접속한 서버가 다른지 확인합니다.
 
 진단 응답은 함수 사용 가능 여부·접근 가능 여부·고정 상태·종료 코드·출력 길이만 담습니다. 암호·쿠키·작업 번호·설정 경로·작업기의 원문 출력은 반환하지 않으며 DB 조회나 직원 자료 수집을 시작하지 않습니다. 로그인하지 않은 요청은 거부합니다.
 
-`worker.state`가 `ok`이면 그 PHP 요청에서 Python 작업 번호 생성은 정상입니다. `process_unavailable`은 필요한 PHP 함수 제한, `spawn_failed`는 프로세스 생성 실패, `worker_exit_failed`는 Python 자식 프로세스 실패, `exit_status_unavailable`은 종료 상태 확인 불가, `timeout`은 응답 시간 초과를 뜻합니다. 해당 JSON을 기준으로 웹 서비스 설정과 Python 실행 환경을 추가 진단합니다.
+`worker.state`가 `ok`이면 그 PHP 요청에서 Python 작업 번호 생성은 정상입니다. `process_unavailable`은 필요한 PHP 함수 제한, `spawn_failed`는 프로세스 생성 실패, `worker_exit_failed`는 Python 자식 프로세스 실패, `exit_status_unavailable`은 종료 상태와 유효한 접수 응답을 확인하지 못함, `acknowledged_exit_unavailable`은 종료 상태는 없지만 작업기 응답을 확인함, `timeout`은 응답 시간 초과를 뜻합니다. 해당 JSON을 기준으로 웹 서비스 설정과 Python 실행 환경을 추가 진단합니다.
+
+### shttpd에서 exit_code=-1, output_bytes=33인 경우
+
+직접 Python 실행은 정상이고 PHP에서 종료 코드를 잃는 경우가 확인되었습니다. PHP와 Python 작업기를 **같은 새 공용 묶음**으로 설치해야 합니다. 작업기는 `--bridge-control`을 사용할 때만 구조화된 성공·접수 응답을 내보내며 기존 `--random-token` 단독 호출은 그대로 32자리 난수를 출력합니다. SSH 업로드 파일 목록과 기존 SSH 프로토콜도 유지합니다.
+
+새 PHP 파일을 서비스에 반영하려면 업무 접속에 영향을 주지 않는 시간에 `/etc/init.d/shttpd restart`를 실행하고 프로그램을 다시 시작합니다. 접속 중인 사용자의 연결은 잠시 끊길 수 있습니다. 이 재시작은 설치 명령이 자동으로 수행하지 않습니다. 수집 완료는 기존 준비 상태·다운로드·해시 검증으로 별도 확인합니다.

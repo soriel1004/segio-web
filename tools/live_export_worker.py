@@ -21,6 +21,7 @@ from export_approval_db import run_export
 from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
+CONTROL_PROTOCOL = 'segio-worker-control/1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
@@ -295,12 +296,19 @@ def run_job(config_path, job_id):
             shutil.rmtree(work)
 
 
+def control_response(operation, **fields):
+    value = {'protocol': CONTROL_PROTOCOL, 'operation': operation, 'ok': True}
+    value.update(fields)
+    print(json.dumps(value, separators=(',', ':')))
+
+
 def main():
     parser = OptionParser()
     parser.add_option('--config')
     parser.add_option('--job')
     parser.add_option('--detach', action='store_true')
     parser.add_option('--random-token', action='store_true')
+    parser.add_option('--bridge-control', action='store_true')
     options, args = parser.parse_args()
     if options.random_token:
         if args or options.config or options.job or options.detach:
@@ -309,13 +317,22 @@ def main():
             token = binascii.hexlify(os.urandom(16)).decode('ascii')
         except (OSError, NotImplementedError):
             return 1
-        print(token)
+        if options.bridge_control:
+            control_response('random-token', token=token)
+        else:
+            print(token)
         return 0
     if args or not options.config or not options.job:
         parser.error('--config and --job required')
+    if options.bridge_control and not options.detach:
+        parser.error('--bridge-control requires --random-token or --detach')
     if options.detach:
+        if options.bridge_control and not re.match(r'\A[a-f0-9]{32}\Z', options.job):
+            parser.error('Invalid job')
         if hasattr(os, 'fork'):
             if os.fork():
+                if options.bridge_control:
+                    control_response('detach', job=options.job)
                 return 0
             os.setsid()
             if os.fork():
@@ -332,6 +349,8 @@ def main():
                                  stdin=stream, stdout=stream, stderr=stream, creationflags=0x00000208)
             finally:
                 stream.close()
+            if options.bridge_control:
+                control_response('detach', job=options.job)
             return 0
     run_job(options.config, options.job)
     return 0
