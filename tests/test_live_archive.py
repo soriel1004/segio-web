@@ -521,7 +521,10 @@ raise SystemExit(worker.main())
             self.assertEqual(value['worker']['exit_code'], 0)
             self.assertTrue(value['worker']['acknowledged'])
             self.assertTrue(value['worker']['exit_status_confirmed'])
-            self.assertGreater(value['worker']['output_bytes'], 33)
+            expected = json.dumps({'protocol':'segio-worker-control/1', 'operation':'random-token',
+                                   'ok':True, 'token':'0'*32}, separators=(',', ':'))
+            self.assertEqual(value['worker']['output_bytes'],
+                             len(expected.encode('ascii')) + len(os.linesep.encode('ascii')))
         finally:
             bridge.write_text(original)
 
