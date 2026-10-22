@@ -68,6 +68,8 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
 
     root = root.resolve()
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+    selected = manifest.get('local_processing', {}).get('changed_mail_sources')
+    changed_sources = set(selected) if isinstance(selected, list) else None
     if manifest.get('user') != user or not isinstance(manifest.get('live_export'), dict):
         raise CollectionError('실시간 추출 정보 또는 그룹웨어 ID가 일치하지 않습니다.')
     files = manifest['files']
@@ -88,6 +90,9 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
         path = root/name
         if path.stat().st_size != source['bytes']:
             raise CollectionError('메일 원본 크기가 변경되었습니다.')
+        if changed_sources is not None and name not in changed_sources:
+            report('prepare_mail',number,len(sources['sources']),unit='files')
+            continue
         raw_bytes += source['bytes']
         with path.open('rb') as stream:
             prefix = stream.read(8192)
@@ -105,6 +110,8 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
             replace_file(path, root/renamed, checkpoint)
             files[renamed] = files.pop(name)
             source['path'] = renamed
+            if changed_sources is not None:
+                changed_sources.add(renamed)
         # Persist each rename before the next cancellable operation.
         atomic_write(sources_file, json.dumps(sources,ensure_ascii=False,indent=2).encode('utf-8'))
         files['mail/sources.json'] = digest_file(sources_file)
@@ -117,7 +124,12 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
     # Raw messages stay intact; reserve another raw-mail-sized allowance for
     # decoded attachments, bounded body previews and filesystem metadata.
     require_space(root, raw_bytes + max(512*1024*1024, raw_bytes//20), '메일 본문·첨부 생성')
-    result = build_compact_catalog(root, user, checkpoint, log, progress)
+    # Persist both old/new paths if a changed source was renamed. Recovery
+    # deletes only those sources' old index rows, preserving all other IDs.
+    if changed_sources is not None:
+        manifest['local_processing']['changed_mail_sources'] = sorted(changed_sources)
+        atomic_write(root/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+    result = build_compact_catalog(root, user, checkpoint, log, progress, changed_sources=changed_sources)
     result.pop('local_processing', None)
     atomic_write(root/'manifest.json', json.dumps(result,ensure_ascii=False,indent=2).encode('utf-8'))
     return result

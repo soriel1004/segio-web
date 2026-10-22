@@ -58,6 +58,8 @@ def load_bundle(directory):
         raise BundleError('Unsupported server cleanup revision.')
     if b'mail-hash-delta-1' not in contents['live_export_worker.py'] or b'cancel-discard-1' not in contents['live_archive_bridge.php']:
         raise BundleError('Unsupported incremental or cancellation cleanup revision.')
+    if any(b'file-time-merge-1' not in contents[name] for name in ('live_export_worker.py','live_archive_bridge.php')):
+        raise BundleError('Unsupported date-selected mail revision.')
     return contents
 
 
@@ -78,6 +80,7 @@ def main():
     print('Mail copy revision: mail-retry-progress-1.')
     print('Server cleanup revision: verified-cleanup-1.')
     print('Incremental mail revision: mail-hash-delta-1; cancellation cleanup: cancel-discard-1.')
+    print('Date-selected mail revision: file-time-merge-1.')
     print('No server configuration, credentials, permissions or jobs changed.')
     print('This is a local bundle check, not a server login or DB connectivity test.')
     return 0

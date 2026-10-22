@@ -4,6 +4,23 @@
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
+## v0.6.2 백업 기준 시각 이후 메일 추출
+
+Windows 0.6.2의 추가 백업에는 `file-time-merge-1`이 필요합니다. 이전 `mail_baseline` 해시 비교 요청도 호환되며 SSH 프로그램의 통신 규약·기존 동작은 유지합니다. 두 프로그램의 진행 중인 백업이 끝난 뒤 root SSH에서 설치하세요. 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.6.2.zip \
+  -o "$TOOLS_DIR/segio-web-0.6.2.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.6.2.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.6.2/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+검사·설치 결과에서 `Date-selected mail revision: file-time-merge-1.`을 확인하세요. 새 시작 요청의 `mail_since`는 서버 기준 Unix 초만 받으며 로그인 직원의 기존 메일 경로 안에서 파일의 mtime·ctime을 비교합니다. 클라이언트가 경로·명령·대상 ID를 선택하지 않습니다. 기준보다 오래된 파일은 목록 대조만 하고 본문을 읽거나 복사·해시·압축하지 않습니다. 시각이 같은 파일도 포함하고, 수집 시작 시각을 다음 정상 백업 기준으로 반환합니다. 미래 기준 시각·잘못된 값·기존 해시 목록과의 동시 사용은 거부합니다. 새 ZIP·각 원본 파일 검증과 변경 중 재시도·직원 인증·CSRF·중단 후 삭제 검증은 유지합니다. Windows는 기존 보관함에 병합하며 같은 초의 중복을 제거합니다. 결재는 기존 문서의 상태 변경을 놓치지 않도록 현재 DB를 조회합니다.
+
 ## v0.6.0 변경분 백업·중단 후 자동 정리
 
 Windows v0.6.0의 추가·변경분 백업에는 `mail-hash-delta-1`, 중단 확인 후 작업기의 자동 삭제에는 `cancel-discard-1`이 필요합니다. 두 프로그램에서 사용 중인 백업이 끝난 뒤 root SSH에서 설치하세요. 그룹웨어 재부팅은 필요하지 않습니다.

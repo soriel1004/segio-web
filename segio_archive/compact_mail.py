@@ -66,7 +66,7 @@ def read_headers(stream, start, end):
     return BytesHeaderParser(policy=policy.compat32).parsebytes(bytes(header))
 
 
-def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None, progress=None):
+def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None, progress=None, *, changed_sources=None):
     from .db_client import safe_member
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('user') != user or not (manifest.get('ssh_export', {}).get('authentication') == 'administrator_ssh' or isinstance(manifest.get('live_export'), dict)):
@@ -79,15 +79,46 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     temporary.unlink(missing_ok=True)
     mail_count, issue_count = 0, 0
     report = progress or (lambda *args, **kwargs: None)
-    total_bytes = sum(source['bytes'] for source in sources['sources'])
+    total_bytes = sum(source['bytes'] for source in sources['sources'] if changed_sources is None or source['path'] in changed_sources)
+    if changed_sources is not None:
+        import shutil
+        shutil.copyfile(database, temporary)
     indexed_bytes = 0
     report('index', 0, total_bytes)
     with closing(sqlite3.connect(temporary)) as db:
         db.execute('PRAGMA temp_store=FILE')
         db.execute('PRAGMA cache_size=-8192')
-        db.execute('CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, folders TEXT, body TEXT, html TEXT)')
-        db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
-        db.execute('CREATE TABLE mail_records (id TEXT PRIMARY KEY, source TEXT, begin INTEGER, end INTEGER, sender TEXT, receiver TEXT, date TEXT)')
+        if changed_sources is None:
+            db.execute('CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, folders TEXT, body TEXT, html TEXT)')
+            db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
+            db.execute('CREATE TABLE mail_records (id TEXT PRIMARY KEY, source TEXT, begin INTEGER, end INTEGER, sender TEXT, receiver TEXT, date TEXT)')
+            next_identity = 0
+        else:
+            db.execute('CREATE INDEX IF NOT EXISTS mail_source_index ON mail_records(source)')
+            maximum = db.execute('SELECT max(id) FROM mail_records').fetchone()[0]
+            next_identity = int(maximum.split('-')[1])+1 if maximum else 0
+            db.execute("DELETE FROM items WHERE kind='approval'")
+            db.execute('DELETE FROM document_records')
+            obsolete = set()
+            for name in changed_sources:
+                checkpoint()
+                obsolete.update(row[0] for row in db.execute('SELECT id FROM mail_records WHERE source=?',(name,)))
+                db.execute('DELETE FROM items WHERE id IN (SELECT id FROM mail_records WHERE source=?)',(name,))
+                db.execute('DELETE FROM mail_records WHERE source=?',(name,))
+            # Drop only the staged copy of pages for a replaced mailbox.
+            # Otherwise every changed MBOX would retain another full set of
+            # obsolete attachments, despite those mails no longer being indexed.
+            from .portable_mail import page_path
+            for identity in obsolete:
+                checkpoint()
+                directory = root/Path(page_path(identity)).parent
+                if directory.exists():
+                    shutil.rmtree(directory)
+            for name in list(files):
+                parts = name.split('/',3)
+                if len(parts)>=3 and parts[:2]==['mail','offline'] and parts[2] in obsolete:
+                    files.pop(name)
+            mail_count = db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
         catalog = json.loads((root/'catalog.json').read_text(encoding='utf-8'))
         report('approval_index',0,len(catalog['items']),unit='messages')
         for number,item in enumerate(catalog['items'],1):
@@ -111,6 +142,9 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                 raise CollectionError('메일 원본의 경로 또는 검증 정보가 일치하지 않습니다.')
             path = root/name
             kind = source.get('format')
+            if changed_sources is not None and name not in changed_sources:
+                issue_count += int(kind not in ('mbox','rfc822'))
+                continue
             if kind == 'mbox':
                 spans = mbox_spans(path, checkpoint,
                     lambda count:report('index',indexed_bytes+count,total_bytes,messages=mail_count))
@@ -127,7 +161,10 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                     message = read_headers(stream, start, end)
                     title = header_text(message.get('Subject')) or '제목 없음'
                     sender, receiver, date = (header_text(message.get(key)) for key in ('From', 'To', 'Date'))
-                    identity = f'mail-{mail_count:09d}'
+                    if next_identity > 999999999:
+                        raise CollectionError('메일 검색 ID가 보관 한도를 넘었습니다.')
+                    identity = f'mail-{next_identity:09d}'
+                    next_identity += 1
                     db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',
                                (identity, 'mail', title, source['name'], '\n'.join((sender, receiver, date)), 'mail/'+identity))
                     db.execute('INSERT INTO mail_records VALUES (?,?,?,?,?,?,?)',
@@ -140,7 +177,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             indexed_bytes += source['bytes']
             report('index', indexed_bytes, total_bytes,messages=mail_count)
         report('index_finalize')
-        db.execute('CREATE INDEX title_index ON items(kind,title)')
+        db.execute('CREATE INDEX IF NOT EXISTS title_index ON items(kind,title)')
+        db.execute('CREATE INDEX IF NOT EXISTS mail_source_index ON mail_records(source)')
         db.commit()
     from .file_ops import replace_file
     replace_file(temporary, database, checkpoint)
@@ -161,7 +199,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     files['catalog.sqlite3'] = digest_file(database, checkpoint,
         lambda count:report('index_finalize',count,size))
     from .portable_mail import build_portable_mail
-    manifest=build_portable_mail(root,manifest,checkpoint,log,progress)
+    manifest=build_portable_mail(root,manifest,checkpoint,log,progress,changed_sources=changed_sources)
     from .search_page import install_search_page
     return install_search_page(root, manifest, checkpoint,progress)
 

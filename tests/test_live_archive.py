@@ -810,13 +810,38 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                 client=DBCollector(config)
                 result=client.run(PASSWORD)
                 manifest=json.loads((result/'manifest.json').read_bytes())
-                self.assertGreater(manifest['incremental']['reused_bytes'],0)
+                self.assertEqual(result,base)
+                self.assertEqual(manifest['last_incremental']['added_mail_files'],1)
                 self.assertTrue(verify_archive(result)['ok'])
                 from segio_archive.compact_mail import search
                 self.assertEqual(search(result,'Native incremental',kind='mail')['total'],1)
                 self.assertTrue(client.cleanup_confirmed)
-                self.assertEqual(saved,{str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()})
+                for name,body in saved.items():
+                    if name.startswith(('mail/raw/','mail/offline/')):
+                        self.assertEqual((base/name).read_bytes(),body)
         finally:mail.unlink(missing_ok=True)
+
+    def test_incremental_cancel_during_staging_removes_only_new_work_and_preserves_existing_backup(self):
+        from segio_archive.web import Cancelled
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                          allow_http=True,headless=True,timeout_ms=10000,
+                          browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            base=DBCollector(config).run(PASSWORD)
+            saved={str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()}
+            config.incremental_base=base
+            config.discard_cancelled=True
+            client=DBCollector(config)
+            def stop(root,archive,destination):
+                client.baseline.prepare(destination,client.checkpoint,client.progress,client.log)
+                config.cancel.set()
+                client.checkpoint()
+            with patch.object(client,'finalize_download',side_effect=stop):
+                with self.assertRaises(Cancelled):client.run(PASSWORD)
+            self.assertEqual(saved,{str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()})
+            self.assertTrue(client.local_discard_confirmed)
+            self.assertTrue(client.cleanup_confirmed)
+            self.assertEqual([path for path in Path(tmp).iterdir() if path.is_dir()],[base])
 
     def test_confirmed_cancel_waits_for_running_server_job_deletion(self):
         from segio_archive.web import Cancelled

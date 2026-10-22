@@ -407,7 +407,24 @@ class IssueReport:
             except OSError:pass
 
 
-def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None):
+def retained_result(root, manifest, record, checkpoint):
+    """Reuse a completed page without rereading old mail/attachment payloads."""
+    path = Path(page_path(record['id'])).parent/'state.json'
+    state_path = local_path(root,path.as_posix())
+    if state_path.stat().st_size > 4*1024*1024 or digest_file(state_path,checkpoint) != manifest['files'].get(path.as_posix()):
+        raise CollectionError('이전 메일 바로보기 검증 정보가 변경되었습니다. 먼저 기존 백업 갱신을 실행하세요.')
+    state = json.loads(state_path.read_bytes())
+    fingerprint = [VERSION,record['source'],record['begin'],record['end'],manifest['files'][record['source']]['sha256']]
+    codes = state.get('issues',[])
+    if (state.get('source') != fingerprint or not isinstance(codes,list) or any(code not in ISSUES for code in codes) or
+            (state.get('raw_only') is True and not codes) or
+            page_path(record['id']) not in state.get('files',{}) or
+            any(value != manifest['files'].get(name) for name,value in state['files'].items())):
+        raise CollectionError('이전 메일 바로보기와 원본 기록이 일치하지 않습니다. 먼저 기존 백업 갱신을 실행하세요.')
+    return {'issues':codes,'raw_only':state.get('raw_only') is True}
+
+
+def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None, *, changed_sources=None):
     root=root.resolve()
     if manifest is None:
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
@@ -416,12 +433,13 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
     if manifest.get('portable_mail',{}).get('version')==VERSION:
         return manifest
     from .db_client import safe_member
-    count=0
+    count,generated=0,0
     report = progress or (lambda *args, **kwargs: None)
     with IssueReport(root,manifest,checkpoint) as issues, closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
         db.row_factory=sqlite3.Row
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
-        report('render', 0, total, unit='messages')
+        target_total = total if changed_sources is None else sum(count for name,count in db.execute('SELECT source,count(*) FROM mail_records GROUP BY source') if name in changed_sources)
+        report('render', 0, target_total, unit='messages')
         rows=db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON m.id=i.id ORDER BY m.source,m.begin')
         with closing(rows), SourceReader() as opened:
             for row in rows:
@@ -436,13 +454,17 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
                     raise CollectionError('메일 원본 파일의 크기가 변경되었습니다.')
                 if not 0<=record['begin']<=record['end']<=path.stat().st_size:
                     raise CollectionError('메일 원본의 위치 또는 크기가 일치하지 않습니다.')
-                stream=opened.open(path)
-                result=render_record(root,manifest,stream,record,checkpoint)
+                if changed_sources is not None and name not in changed_sources:
+                    result=retained_result(root,manifest,record,checkpoint)
+                else:
+                    stream=opened.open(path)
+                    result=render_record(root,manifest,stream,record,checkpoint)
+                    generated+=1
+                    report('render', generated, target_total, unit='messages')
                 issues.add(record,result)
                 count+=1
-                report('render', count, total, unit='messages')
                 if count%100==0 or count==total:
-                    log(f'메일 바로보기 생성 {count:,} / {total:,}건')
+                    log(f'추가·변경 메일 바로보기 생성 {generated:,} / {target_total:,}건 · 기존 메일 유지' if changed_sources is not None else f'메일 바로보기 생성 {count:,} / {total:,}건')
         if count!=total:
             raise CollectionError('메일 원본 위치 기록과 목록의 건수가 일치하지 않습니다.')
     manifest['portable_mail']={'version':VERSION,'count':count,'text_limit':TEXT_LIMIT,

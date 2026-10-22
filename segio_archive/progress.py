@@ -13,6 +13,7 @@ LABELS = {
     'index_finalize': '검색 DB 저장·검증', 'search': '보관함 검색 목록 생성',
     'reuse': '이전 백업의 변경 없는 메일 복사·검증',
     'cancel_cleanup': '백업 중단·이번 작업 자료 정리',
+    'merge': '기존 백업 반영 준비', 'merge_commit': '기존 백업 폴더에 추가 자료 반영',
 }
 
 

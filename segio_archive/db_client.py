@@ -239,6 +239,7 @@ class PreparedDBCollector(Collector):
         self.user_agent = None
         self.owned_folders = []
         self.local_discard_confirmed = False
+        self.commit_finished = False
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
             raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
 
@@ -291,6 +292,9 @@ class PreparedDBCollector(Collector):
 
     def reset_remote_job(self):
         pass
+
+    def publish_result(self, destination):
+        return destination
 
     def record_failure(self, exception):
         try:
@@ -379,7 +383,11 @@ class PreparedDBCollector(Collector):
                 if self.keep_zip:
                     raise
                 reason = exc if isinstance(exc,CollectionError) else processing_error(exc,self.phase)
-                error = CollectionError(str(reason)+'\n검증된 원본은 보존했습니다. ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(destination)+' [LOCAL_INDEX_PENDING]')
+                message = ('\n기존 백업은 변경하지 않았습니다. 임시 반영 자료를 보존했습니다: '+str(destination)+
+                           '\n폴더 접근 상태를 확인한 뒤 같은 기존 백업으로 추가 백업을 다시 실행하세요.'
+                           if getattr(self,'baseline',None) and self.phase=='기존 백업 반영 준비' else
+                           '\n검증된 원본은 보존했습니다. ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(destination))
+                error = CollectionError(str(reason)+message+' [LOCAL_INDEX_PENDING]')
                 error.filesystem_diagnostic = getattr(reason,'filesystem_diagnostic',None)
                 error.processing_diagnostic = getattr(reason,'processing_diagnostic',None)
                 raise error from None
@@ -393,6 +401,7 @@ class PreparedDBCollector(Collector):
         from playwright.sync_api import sync_playwright
         self.owned_folders=[]
         self.local_discard_confirmed=False
+        self.commit_finished=False
         self.reset_remote_job()
         try:
             self.checkpoint()
@@ -433,6 +442,7 @@ class PreparedDBCollector(Collector):
                     self.checkpoint()
                     self.finish_remote_cleanup(result)
                     self.checkpoint()
+                    result = self.publish_result(result)
                     self.log("다운로드와 파일 검증 완료: " + str(result))
                     return result
                 finally:
@@ -447,7 +457,7 @@ class PreparedDBCollector(Collector):
                     except Exception:
                         pass
                     self.context = self.page = self.browser = None
-                    if self.config.discard_cancelled and self.config.cancel.is_set():
+                    if self.config.discard_cancelled and self.config.cancel.is_set() and not self.commit_finished:
                         self.checkpoint()
         except Cancelled:
             if self.config.discard_cancelled:
@@ -596,6 +606,7 @@ class DBCollector(PreparedDBCollector):
             'mail_path_unconfigured':'서버의 직원별 메일 저장 경로가 설정되지 않았습니다.',
             'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
             'mail_changed_retry':'서버 메일이 변경되어 안정적인 원본을 확보하지 못했습니다. 메일 정리·이동을 멈추고 다시 실행하거나 메일 사용이 적은 시간에 실행하세요.',
+            'invalid_mail_since':'이전 백업의 서버 기준 시각을 사용할 수 없습니다. 서버 시계와 이전 백업 완료 상태를 확인하세요.',
             'export_already_running':'이 직원의 추출 작업이 이미 진행 중입니다. 완료 후 다시 실행하세요.',
             'export_busy':'서버에서 다른 추출 작업이 진행 중입니다. 잠시 후 다시 실행하세요.',
             'export_process_unavailable':'서버 추출 작업기를 시작하지 못했습니다. Python·실행 계정 권한을 확인하세요.',
@@ -726,15 +737,21 @@ class DBCollector(PreparedDBCollector):
             raise CollectionError('이 서버는 실시간 DB 추출을 지원하지 않습니다.')
         self.csrf = info['csrf']
         fields={}
-        if self.config.incremental_base and self.config.mail:
-            if info.get('incremental_revision')!='mail-hash-delta-1':
-                raise CollectionError('변경분 백업을 사용하려면 서버 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
-            from .incremental import Baseline
-            self.log('이전 백업의 완료 상태와 메일 원본 검증 목록을 확인하는 중')
-            self.baseline=Baseline(self.config.incremental_base,self.config.username,self.checkpoint)
-            fields['mail_baseline']=self.baseline.payload()
         if self.config.incremental_base:
-            self.log('결재는 현재 상태를 다시 조회하고, 메일은 변경 없는 원본 파일의 서버 압축·전송을 생략합니다.')
+            from .date_incremental import DateBaseline, REVISION
+            if self.config.mail and info.get('mail_date_revision')!=REVISION:
+                raise CollectionError('백업 시각 이후 메일만 받아 기존 폴더에 반영하려면 서버 공용 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
+            self.log('기존 백업의 완료 상태·백업 기준 시각·검색 DB를 확인하는 중')
+            self.baseline=DateBaseline(self.config.incremental_base,self.config.username,self.checkpoint)
+            self.config.output=self.baseline.root.parent
+            if self.config.mail:
+                if (not self.baseline.sources and not self.baseline.manifest.get('mail_checkpoint') and
+                        not self.baseline.manifest['live_export'].get('mail')):
+                    raise CollectionError('선택한 이전 백업에는 메일이 포함되지 않았습니다. 메일을 처음 보관할 때는 전체 백업을 실행하세요.')
+                fields['mail_since']=str(self.baseline.since)
+                cutoff=datetime.fromtimestamp(self.baseline.since,timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
+                self.log('추가 메일 기준 시각: '+cutoff+' · 이후 저장·변경된 파일만 추출합니다.')
+            self.log('선택한 기존 백업 폴더에 추가 자료를 반영합니다. 결재는 현재 상태를 다시 조회합니다.')
         self.start_requested = True
         started = self.live_call('start', post=True, approvals='1' if self.config.approvals else '0',
                                  mail='1' if self.config.mail else '0',**fields)
@@ -760,7 +777,7 @@ class DBCollector(PreparedDBCollector):
                           attempt=measured.get('attempt'))
             if phase!=previous:
                 self.log({'queued':'서버 추출 요청 접수', 'database':'로그인한 직원의 DB 자료를 읽는 중',
-                          'mail':'서버 MBOX 원본 전체를 복사하는 중', 'packing':'전송 자료를 압축하는 중',
+                          'mail':'기준 시각 이후 저장·변경된 메일 파일만 복사하는 중' if self.baseline else '서버 MBOX 원본 전체를 복사하는 중', 'packing':'전송 자료를 압축하는 중',
                           'hashing':'서버 전송 ZIP의 무결성을 검증하는 중',
                           'ready':'이번 요청의 DB·MBOX 추출 완료'}.get(phase,'서버 추출 작업 확인 중'))
                 previous = phase
@@ -789,16 +806,38 @@ class DBCollector(PreparedDBCollector):
             live.get('mail')!=self.config.mail):
             raise CollectionError('이번 요청의 DB·MBOX 선택과 추출 결과가 일치하지 않습니다.')
         if self.baseline:
-            count,size=self.baseline.restore(destination,self.checkpoint,self.progress)
-            self.log('이전 백업에서 변경 없는 메일 원본 %d개 (%.1f MiB)를 검증해 새 백업에 복사했습니다.'%(count,size/1024**2))
-        elif manifest.get('incremental'):
+            if self.config.mail:
+                self.baseline.validate_delta(destination)
+        elif manifest.get('incremental') or manifest.get('mail_delta'):
             raise CollectionError('전체 백업 요청에 변경분 보관본이 반환되어 중단했습니다.')
 
     def finalize_download(self, root, archive, destination):
         from .mail_import import build_local_catalog
+        if self.baseline:
+            self.phase = '기존 백업 반영 준비'
+            self.baseline.prepare(destination,self.checkpoint,self.progress,self.log,
+                                  approvals=self.config.approvals,mail=self.config.mail)
         self.phase = 'Windows DB·메일 검색 색인 생성'
         self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
         build_local_catalog(destination, self.config.username, self.checkpoint, self.log, self.progress)
+
+    def publish_result(self, destination):
+        if not self.baseline:
+            return destination
+        self.phase = '기존 백업 폴더에 추가 자료 반영'
+        self.progress('merge_commit')
+        try:
+            result=self.baseline.commit(destination,self.checkpoint,self.log)
+        except Cancelled:
+            raise
+        except Exception as exc:
+            reason=exc if isinstance(exc,CollectionError) else processing_error(exc,self.phase)
+            error=CollectionError(str(reason)+'\n기존 백업 반영을 완료하지 못했습니다. 생성한 반영본은 다음 폴더에 보존했습니다: '+str(destination))
+            error.filesystem_diagnostic=getattr(reason,'filesystem_diagnostic',None)
+            error.processing_diagnostic=getattr(reason,'processing_diagnostic',None)
+            raise error from None
+        self.commit_finished=True
+        return result
 
     def cleanup_remote(self, attempt_limit=3):
         if self.cleanup_confirmed or self.cleanup_cancel_requested or not self.job or not self.csrf:

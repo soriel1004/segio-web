@@ -44,6 +44,7 @@ class App(tk.Tk):
         self.manual = tk.BooleanVar(value=False)
         self.backup_mode = tk.StringVar(value='full')
         self.baseline_folder = tk.StringVar()
+        self.backup_hint = tk.StringVar(value='전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
         self.progress_text = tk.StringVar(value='백업을 시작하면 단계별 처리량을 표시합니다.')
         self.progress_detail = ''
@@ -82,13 +83,14 @@ class App(tk.Tk):
         mode_row.pack(fill='x',pady=5)
         ttk.Label(mode_row,text='백업 범위',width=20).pack(side='left')
         ttk.Radiobutton(mode_row,text='처음부터 전체 백업',variable=self.backup_mode,value='full',command=self.backup_mode_changed).pack(side='left')
-        ttk.Radiobutton(mode_row,text='이전 백업 이후 추가·변경분',variable=self.backup_mode,value='incremental',command=self.backup_mode_changed).pack(side='left',padx=12)
+        ttk.Radiobutton(mode_row,text='이전 백업 이후 추가 · 기존 폴더 반영',variable=self.backup_mode,value='incremental',command=self.backup_mode_changed).pack(side='left',padx=12)
         baseline_row=ttk.Frame(panel)
         baseline_row.pack(fill='x',pady=(0,5))
-        ttk.Label(baseline_row,text='비교할 이전 백업',width=20).pack(side='left')
+        ttk.Label(baseline_row,text='반영할 기존 백업',width=20).pack(side='left')
         ttk.Entry(baseline_row,textvariable=self.baseline_folder,state='readonly').pack(side='left',fill='x',expand=True)
         self.baseline_button=ttk.Button(baseline_row,text='선택',command=self.choose_baseline,state='disabled')
         self.baseline_button.pack(side='left',padx=(8,0))
+        ttk.Label(panel,textvariable=self.backup_hint,wraplength=780).pack(fill='x',pady=(0,5))
         choices = ttk.Frame(panel)
         choices.pack(fill="x")
         self.collection_choices = []
@@ -127,6 +129,7 @@ class App(tk.Tk):
 
     def backup_mode_changed(self):
         self.baseline_button.config(state='normal' if self.backup_mode.get()=='incremental' else 'disabled')
+        self.backup_hint.set('추가 백업은 선택한 기존 폴더에 반영합니다. 메일은 마지막 기준 시각 이후 파일만, 결재는 현재 상태를 갱신합니다.' if self.backup_mode.get()=='incremental' else '전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
 
     def choose_baseline(self):
         if self.running:
@@ -151,7 +154,7 @@ class App(tk.Tk):
             config.minimize_browser = True
             if self.backup_mode.get()=='incremental':
                 if not self.baseline_folder.get():
-                    raise ValueError('비교할 이전 백업 폴더를 선택하세요.')
+                    raise ValueError('추가 자료를 반영할 기존 백업 폴더를 선택하세요.')
                 config.incremental_base=Path(self.baseline_folder.get())
             password = self.password.get()
             if not password and not config.manual_login:
@@ -174,7 +177,7 @@ class App(tk.Tk):
             from .db_client import DBCollector
             collector = DBCollector(config, lambda s:self.events.put(('log',s)))
             path = collector.run(password)
-            if config.discard_cancelled and config.cancel.is_set():
+            if config.discard_cancelled and config.cancel.is_set() and not collector.commit_finished:
                 collector.discard_local_on_cancel()
                 raise Cancelled('백업을 중단했습니다. 이번 작업의 파일·폴더 정리 결과를 프로그램 로그에서 확인하세요.')
             self.events.put(("done", path))

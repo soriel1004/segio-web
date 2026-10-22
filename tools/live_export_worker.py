@@ -26,6 +26,7 @@ CONTROL_PROTOCOL = 'segio-worker-control/1'
 MAIL_COPY_REVISION = 'mail-retry-progress-1'
 INCREMENTAL_REVISION = 'mail-hash-delta-1'
 CANCEL_CLEANUP_REVISION = 'cancel-discard-1'
+MAIL_DATE_REVISION = 'file-time-merge-1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
@@ -225,7 +226,25 @@ def mail_name_hex(name):
     return binascii.hexlify(raw).decode('ascii')
 
 
-def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fields: None, baseline=None):
+def parse_mail_since(raw):
+    if raw is None:
+        return None
+    if not isinstance(raw, str if sys.version_info[0] >= 3 else basestring) or not re.match(r'\A[0-9]{1,12}\Z', raw):
+        raise SafeError('invalid_mail_since')
+    value = int(raw)
+    if value < 1 or value > time.time() + 300:
+        raise SafeError('invalid_mail_since')
+    return value
+
+
+def mail_file_time(identity):
+    # Linux ctime also catches newly saved files whose old mtime was retained.
+    # It is a metadata-change time, not a portable file-creation timestamp.
+    values = [value for value in identity[3:5] if value is not None]
+    return max(value / 1000000000.0 if value > 100000000000 else value for value in values)
+
+
+def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fields: None, baseline=None, since=None):
     root = mail_path(template, user)
     cached, slots = {}, {}
     failure = SafeError('mail_changed_retry')
@@ -235,7 +254,8 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
         checkpoint()
         root = mail_path(template, user)
         try:
-            before = inventory(root)
+            complete_before = inventory(root)
+            before = [item for item in complete_before if since is None or mail_file_time(item[2]) >= since]
         except (IOError, OSError) as exc:
             if exc.errno == errno.ENOENT:
                 continue
@@ -283,7 +303,7 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
             if exc.errno == errno.ENOENT:
                 continue
             raise
-        if after == before and all(name in cached and cached[name][0] == expected
+        if after == complete_before and all(name in cached and cached[name][0] == expected
                                    for name, path, expected in before):
             break
     else:
@@ -311,7 +331,8 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
             except UnicodeError:
                 display_name = raw_name.decode('utf-8', 'replace')
         sources.append({'name': display_name, 'name_bytes_hex': binascii.hexlify(raw_name).decode('ascii'),
-                        'path': relative, 'bytes': info['bytes'], 'sha256': info['sha256']})
+                        'path': relative, 'bytes': info['bytes'], 'sha256': info['sha256'],
+                        'stored_at': int(mail_file_time(expected))})
     path = os.path.join(folder, 'mail', 'sources.json')
     if not os.path.isdir(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), 0o700)
@@ -417,6 +438,9 @@ def run_job(config_path, job_id):
         os.mkdir(work, 0o700)
         checkpoint()
         baseline=parse_mail_baseline(request.get('mail_baseline'))
+        since=parse_mail_since(request.get('mail_since'))
+        if baseline is not None and since is not None:
+            raise SafeError('invalid_mail_since')
         if request.get('approvals') is True:
             stage = 'database'
             status('running', 'database')
@@ -441,8 +465,15 @@ def run_job(config_path, job_id):
             status('running', 'mail')
             if baseline is not None:
                 manifest['incremental']={'protocol':'segio-incremental/1','reused_mail':{},'basis':'content_sha256'}
+            # Save the beginning of this successful scan, not its completion.
+            # Equality is included next time to cover second-resolution clocks
+            # and mail arriving while this snapshot is being collected.
+            manifest['mail_checkpoint'] = int(time.time())
+            if since is not None:
+                manifest['mail_delta']={'protocol':'segio-mail-date/1','since':since,
+                                        'basis':'file_mtime_or_ctime','revision':MAIL_DATE_REVISION}
             copy_mail(config.get('mail_template'), user, folder, manifest, checkpoint,
-                      lambda **fields: report('mail', **fields),baseline=baseline)
+                      lambda **fields: report('mail', **fields),baseline=baseline,since=since)
         manifest['live_export'] = {'requested_at': request['created_at'], 'job': job_id,
                                    'approvals': request.get('approvals') is True, 'mail': request.get('mail') is True}
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
