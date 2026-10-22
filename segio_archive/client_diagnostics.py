@@ -17,7 +17,7 @@ PHASES = {'시작','브라우저 시작','SEGIO 로그인','서버 연결 기능
           '서버 추출 요청','서버 추출 상태 확인','서버 연결','다운로드 저장 폴더 준비',
           '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성'}
 ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARGE',
-               'service_not_configured',
+               'service_not_configured','job_not_found','BRIDGE_STATUS_NOT_FOUND',
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
                'LOGIN_ORIGIN_MISMATCH','LOGIN_NOT_CONFIRMED','BRIDGE_REDIRECT',
                'TIMEOUT','LOGIN_FRAME_TRANSITION','BROWSER_CONNECTION_ERROR',
@@ -30,6 +30,15 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'ECONNREFUSED','ECONNRESET','ENOTFOUND','CERT_HAS_EXPIRED'}
 SERVICE_CHECKS = {'config_exists','config_readable','config_json_object',
                   'php_path_restriction','php_safe_mode'}
+BRIDGE_STATES = {'available','not_found','login_required','service_not_configured','unavailable'}
+
+
+def safe_response(data):
+    return {
+        'action':data.get('action') if data.get('action') in ACTIONS else 'unknown',
+        'http_status':data.get('http_status') if type(data.get('http_status')) is int and 100<=data['http_status']<=599 else None,
+        'content_type':data.get('content_type') if data.get('content_type') in MEDIA|{'missing','other'} else 'other',
+        'body_kind':data.get('body_kind') if data.get('body_kind') in BODY_KINDS else 'other'}
 
 
 def response_summary(action, status, content_type, body=b''):
@@ -89,12 +98,14 @@ def write_failure(output, exception, phase):
               'failed_at':datetime.now(timezone.utc).isoformat(timespec='seconds'),
               'phase':phase if phase in PHASES else 'unknown','error':code}
     if isinstance(exception,BridgeResponseError):
-        data = exception.diagnostic
-        record['response'] = {
-            'action':data.get('action') if data.get('action') in ACTIONS else 'unknown',
-            'http_status':data.get('http_status') if type(data.get('http_status')) is int and 100<=data['http_status']<=599 else None,
-            'content_type':data.get('content_type') if data.get('content_type') in MEDIA|{'missing','other'} else 'other',
-            'body_kind':data.get('body_kind') if data.get('body_kind') in BODY_KINDS else 'other'}
+        record['response'] = safe_response(exception.diagnostic)
+    checks = getattr(exception,'status_checks',None)
+    if isinstance(checks,dict):
+        record['status_checks'] = {
+            'attempts':checks.get('attempts') if type(checks.get('attempts')) is int and 1<=checks['attempts']<=3 else None,
+            'bridge_state':checks.get('bridge_state') if checks.get('bridge_state') in BRIDGE_STATES else 'unavailable'}
+        if isinstance(checks.get('bridge_response'),dict):
+            record['status_checks']['bridge_response'] = safe_response(checks['bridge_response'])
     checks = getattr(exception,'server_checks',None)
     if isinstance(checks,dict):
         record['server_checks'] = {key:value for key,value in checks.items()

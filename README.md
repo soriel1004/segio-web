@@ -1,14 +1,24 @@
-# 개인 SEGIO 로그인으로 자료 받기 · v0.5.8
+# 개인 SEGIO 로그인으로 자료 받기 · v0.5.9
 
-개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.8 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.8.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.8**을 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
+개인 SEGIO 직원 아이디·암호로 본인의 결재 문서와 메일을 폴더에 보관합니다. [v0.5.9 소스 ZIP 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-web-0.5.9.zip) 후 Windows에 Python 3.12를 설치하고 `run_windows.bat`을 실행합니다. 창의 **v0.5.9**를 확인하세요. Windows 실행 파일은 [이 저장소의 Actions](https://github.com/soriel1004/segio-web/actions)에서 해당 버전의 성공한 빌드가 있는지 확인한 뒤 받습니다. 기존 `segio` 저장소의 SSH 전용 실행 파일은 별도 프로그램입니다.
 
-프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.8.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
+프로그램 배포 ZIP 파일명은 `segio-web-{프로그램 버전}.zip` 형식입니다. 현재 버전은 `segio-web-0.5.9.zip`이며, Windows 빌드도 프로그램의 버전 번호를 읽어 같은 이름으로 저장합니다.
 
 첫 화면은 **결재 문서·메일·암호화되지 않은 HTTP 연결 허용**만 기본 선택합니다. HTTPS 주소에서는 인증서 검증을 유지합니다. 개인 로그인 방식은 [서버 연결 기능](docs/WINDOWS_LOGIN.md)이 설치되어 있어야 하며, 서버에는 전송·검증용 임시 ZIP이 필요합니다. 내려받은 뒤 다시 ZIP을 만들거나 최종 ZIP을 추가 저장하지 않고 **백업 폴더만** 남깁니다. SSH 방식의 추가 ZIP도 기본 해제입니다.
 
 첫 화면은 **개인 SEGIO 로그인으로 자료 받기** 전용이며 가져오기 방식 목록을 표시하지 않습니다. 기본 서버는 `lssgroup.co.kr`의 기존 로그인 경로이고, 계정 입력 이름은 **그룹웨어 ID·그룹웨어 암호**입니다.
 
-서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.8 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+서버 결재 DB 추출에서 `category: encoding` 오류가 발생하면 [공용 tools의 한글 경로 수정 안내](tools/README.md#결재-db-추출-단계의-encoding-오류)에 따라 서버 도구를 갱신하세요. v0.5.9 묶음의 추출기 표기는 `db-native-paths-1`입니다.
+
+## 추출 대기 중 HTTP 404
+
+v0.5.9는 상태 조회가 HTML·일반 텍스트·빈 본문의 HTTP 404를 반환하면 같은 작업의 상태 GET만 최대 두 번 재시도합니다. 일시 오류가 해소되면 다운로드·검증·서버 임시 자료 정리를 계속합니다. 추출 시작 POST를 다시 보내거나 새 작업으로 바꾸지 않습니다. 로그인 화면·PHP 소스·PHP 오류는 즉시 거부하며, 서버가 JSON으로 `job_not_found`를 명시하면 같은 작업을 반복 조회하지 않습니다.
+
+404가 계속되면 같은 인증 연결의 `info` GET을 한 번 점검해 로그인 연결 정상·연결 경로 404·로그인 재확인 필요·서버 설정 오류·점검 실패를 구분합니다. 오류 JSON의 `response`에는 원래 상태 조회 결과를 유지하고, `status_checks`에는 조회 횟수와 연결 점검 결과를 추가합니다. 응답 본문·쿠키·직원 ID·작업 번호·주소·암호는 기록하지 않습니다. 연결 점검도 새 백업을 시작하지 않으며, 영구적인 404를 백업 완료로 처리하지 않습니다.
+
+운영 자료에서 확인된 오류는 v0.5.8의 상태 조회 HTTP 404 / text/html입니다. 사용자 SSH 진단에서는 비공개 설정·작업 폴더 쓰기·DB 연결이 정상이고, 세 주소의 기본 연결 기능도 JSON을 반환했습니다. 이 결과만으로 당시 상태 요청이 404였던 서버 측 원인은 확정할 수 없습니다. 서버 `cancelled / packing` 기록은 압축 단계 중단 기록이며 404 원인과 같다고 단정하지 않습니다. 재발하면 새 `last-client-failure.json`의 상태 조회·연결 점검 결과와 같은 시각의 웹 서버 기록을 확인합니다.
+
+Windows 프로그램만 v0.5.9로 갱신하세요. 서버 공용 tools는 v0.5.7·v0.5.8과 동일하므로 해당 서버 설치를 마쳤다면 재설치·재부팅이 필요하지 않습니다.
 
 ## 실행 창 최소화·서버 설정 오류 확인
 

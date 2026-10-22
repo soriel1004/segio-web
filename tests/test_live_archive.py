@@ -836,7 +836,7 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
             finally:
                 viewer.close()
 
-    def install_test_status_html(self, transient_errors):
+    def install_test_status_html(self, transient_errors, http_status=None):
         router=self.root/'router.php'
         original=router.read_text()
         counter=self.root/'synthetic-status-count'
@@ -850,10 +850,12 @@ if ($path==='/segio/archive/live.php' && isset($_GET['action']) && $_GET['action
     if (ERROR_COUNT<0 || $count<=ERROR_COUNT) {
         header('HTTP/1.1 ERROR_STATUS',true,ERROR_STATUS);
         header('Content-Type: text/html; charset=UTF-8');
-        echo '<html><body>PRIVATE_HTML_MUST_NEVER_BE_SAVED</body></html>'; return;
+        echo 'ERROR_BODY'; return;
     }
 }
-""".replace('ERROR_COUNT',str(transient_errors)).replace('ERROR_STATUS','200' if transient_errors<0 else '503')
+""".replace('ERROR_COUNT',str(transient_errors)).replace('ERROR_STATUS',str(http_status or (200 if transient_errors<0 else 503)))
+        injected=injected.replace('ERROR_BODY','PRIVATE_HTML_MUST_NEVER_BE_SAVED' if http_status==404
+                                  else '<html><body>PRIVATE_HTML_MUST_NEVER_BE_SAVED</body></html>')
         self.assertIn(marker,original)
         router.write_text(original.replace(marker,marker+injected,1))
         return router,original,counter
@@ -877,6 +879,52 @@ if ($path==='/segio/archive/live.php' && isset($_GET['action']) && $_GET['action
         finally:
             router.write_text(original)
             counter.unlink(missing_ok=True)
+
+    def test_transient_404_status_recovers_and_finishes_verified_cleanup(self):
+        router,original,counter=self.install_test_status_html(2,http_status=404)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                client=DBCollector(config)
+                with patch.object(client,'live_call',wraps=client.live_call) as calls:
+                    result=client.run(PASSWORD)
+                self.assertEqual(sum(call.args[0]=='start' for call in calls.call_args_list),1)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),self.original)
+                self.assertTrue(client.cleanup_confirmed)
+                self.assertFalse((self.live_root/'jobs'/client.job).exists())
+                self.assertFalse((Path(tmp)/'last-client-failure.json').exists())
+        finally:
+            router.write_text(original)
+            counter.unlink(missing_ok=True)
+
+    def test_permanent_404_status_preserves_diagnosis_through_cleanup(self):
+        router,original,counter=self.install_test_status_html(-1,http_status=404)
+        client=None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                client=DBCollector(config)
+                with patch.object(client,'live_call',wraps=client.live_call) as calls:
+                    with self.assertRaisesRegex(CollectionError,'로그인 연결은 정상.*BRIDGE_STATUS_NOT_FOUND'):
+                        client.run(PASSWORD)
+                self.assertEqual(sum(call.args[0]=='start' for call in calls.call_args_list),1)
+                record=(Path(tmp)/'last-client-failure.json').read_text()
+                value=json.loads(record)
+                self.assertEqual(value['response'],{'action':'status','http_status':404,
+                                 'content_type':'text/html','body_kind':'other'})
+                self.assertEqual(value['status_checks'],{'attempts':3,'bridge_state':'available'})
+                self.assertEqual(value['phase'],'서버 추출 상태 확인')
+                for secret in ('PRIVATE_HTML','employee',client.job,PASSWORD,str(self.live_root)):
+                    self.assertNotIn(secret,record)
+        finally:
+            router.write_text(original)
+            counter.unlink(missing_ok=True)
+            if client and client.job:shutil.rmtree(self.live_root/'jobs'/client.job,ignore_errors=True)
 
     def test_client_html_error_survives_server_cleanup_cancellation(self):
         import time

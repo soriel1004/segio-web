@@ -24,7 +24,7 @@ from urllib.parse import urlencode, urljoin
 
 from .browser import BrowserUnavailable, launch_browser
 from .archive import safe_name
-from .web import Collector, CollectionError, Config, origin
+from .web import Cancelled, Collector, CollectionError, Config, origin
 from .client_diagnostics import BridgeResponseError, ServiceConfigurationError, response_summary, write_failure
 from .progress import ProgressReporter
 from .file_ops import file_diagnostic
@@ -459,8 +459,6 @@ class DBCollector(PreparedDBCollector):
         try:
             if pending_login and response.status==401:
                 return None
-            if response.status==404 and action=='info':
-                raise CollectionError('실시간 DB·MBOX 연결 기능이 없습니다. 서버에서 install_live_archive.py를 한 번 설치해야 합니다. [BRIDGE_NOT_INSTALLED]')
             if pending_login and response.status in {301,302,303,307,308}:
                 location = urljoin(url,response.headers.get('location',''))
                 if origin(location) in self.scope:
@@ -471,6 +469,9 @@ class DBCollector(PreparedDBCollector):
             if len(body)>65536:
                 raise BridgeResponseError('서버 추출 응답이 너무 큽니다. 연결 주소와 PHP 실행 상태를 확인하세요.',
                                           'BRIDGE_RESPONSE_TOO_LARGE',diagnostic)
+            if response.status==404 and action=='info':
+                raise BridgeResponseError('서버 연결 경로가 HTTP 404를 반환했습니다. live.php 설치 파일과 접속 주소의 웹 서버 경로 처리를 확인하세요.',
+                                          'BRIDGE_NOT_INSTALLED',diagnostic)
             if diagnostic['content_type']!='application/json':
                 if pending_login and response.status==200 and re.search(rb'<input\b[^>]*\btype\s*=\s*[\'"]?password\b',body,re.I):
                     return None
@@ -492,6 +493,9 @@ class DBCollector(PreparedDBCollector):
                     raise ServiceConfigurationError(diagnostic,value.get('checks'))
                 if pending_login and value['error']=='native_login_required':
                     return None
+                if value['error']=='job_not_found':
+                    raise BridgeResponseError('서버가 기존 추출 작업을 찾지 못했거나 해당 작업의 접근을 허용하지 않았습니다.',
+                                              'job_not_found',diagnostic)
                 raise CollectionError(self.error_message(value['error']))
             if response.status>=300:
                 code = value.get('error','') if isinstance(value,dict) else ''
@@ -584,8 +588,48 @@ class DBCollector(PreparedDBCollector):
             self.page.wait_for_timeout(250)
         raise CollectionError('로그인 응답 뒤 서버가 본인 인증을 확인하지 못했습니다. live.php의 인증 전달과 서버 주소를 확인하세요. [LOGIN_NOT_CONFIRMED]')
 
+    def status_not_found(self, original, attempts):
+        """Probe the same authenticated endpoint without starting another job."""
+        checks = {'attempts':attempts,'bridge_state':'unavailable'}
+        server_checks = None
+        self.checkpoint()
+        try:
+            info = self.live_call('info',pending_login=True,
+                                  timeout_ms=min(self.config.timeout_ms,10000))
+            checks['bridge_state'] = ('login_required' if info is None else
+                'available' if info.get('capabilities',{}).get('live_db') is True else 'unavailable')
+        except Cancelled:
+            raise
+        except BridgeResponseError as exc:
+            checks['bridge_response'] = exc.diagnostic
+            checks['bridge_state'] = {
+                'BRIDGE_NOT_INSTALLED':'not_found','BRIDGE_LOGIN_REQUIRED':'login_required',
+                'service_not_configured':'service_not_configured'}.get(exc.code,'unavailable')
+            server_checks = getattr(exc,'server_checks',None)
+        except Exception:
+            # Browser exception messages can contain cookies and private URLs.
+            pass
+        finally:
+            self.phase = '서버 추출 상태 확인'
+        self.checkpoint()
+        message = ('서버가 기존 추출 작업을 찾지 못했거나 접근을 허용하지 않았습니다.'
+                   if original.code=='job_not_found' else
+                   '상태 조회를 재시도했지만 HTTP 404로 기존 추출 작업의 상태를 확인하지 못했습니다.')
+        message += ' '+{
+            'available':'로그인 연결은 정상입니다. 서버 jobs 폴더의 작업·상태 파일과 웹 서버의 요청 경로 처리를 확인하세요.',
+            'not_found':'로그인 확인 경로도 HTTP 404입니다. live.php 파일과 접속 주소의 웹 서버 경로 처리를 확인하세요.',
+            'login_required':'로그인 연결을 다시 확인하지 못했습니다. 그룹웨어에 다시 로그인하세요.',
+            'service_not_configured':'서버 비공개 추출 설정을 읽지 못했습니다. 설치 경로·설정 파일·PHP 접근 제한을 확인하세요.',
+            'unavailable':'로그인 연결 점검도 완료하지 못했습니다. 서버 연결과 live.php 실행 상태를 확인하세요.'}[checks['bridge_state']]
+        error = BridgeResponseError(message,'job_not_found' if original.code=='job_not_found'
+                                    else 'BRIDGE_STATUS_NOT_FOUND',original.diagnostic)
+        error.status_checks = checks
+        if server_checks is not None:
+            error.server_checks = server_checks
+        return error
+
     def poll_status(self):
-        """Retry only read-only status requests for explicit transient failures."""
+        """Retry bounded read-only lookups; never replay the export start POST."""
         from playwright.sync_api import Error, TimeoutError as BrowserTimeout
         for attempt in range(3):
             self.checkpoint()
@@ -597,7 +641,11 @@ class DBCollector(PreparedDBCollector):
                     transient = True
                 if isinstance(exc,BridgeResponseError):
                     data = exc.diagnostic
-                    transient = data['http_status'] in (408,429,500,502,503,504) and data['body_kind'] not in ('login_form','php_error','php_source')
+                    missing = (data['http_status']==404 and exc.code=='BRIDGE_NOT_JSON'
+                               and data['body_kind'] not in ('login_form','php_error','php_source'))
+                    if exc.code=='job_not_found' or (missing and attempt==2):
+                        raise self.status_not_found(exc,attempt+1) from None
+                    transient = (missing or data['http_status'] in (408,429,500,502,503,504)) and data['body_kind'] not in ('login_form','php_error','php_source')
                 if not transient or attempt==2:
                     raise
                 self.log('서버 상태 조회의 일시적인 오류로 재시도합니다. (%d/2)'%(attempt+1))
