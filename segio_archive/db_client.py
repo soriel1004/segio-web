@@ -25,7 +25,7 @@ from urllib.parse import urlencode, urljoin
 from .browser import BrowserUnavailable, launch_browser
 from .archive import safe_name
 from .web import Cancelled, Collector, CollectionError, Config, origin
-from .client_diagnostics import BridgeResponseError, ServiceConfigurationError, response_summary, write_failure
+from .client_diagnostics import BridgeResponseError, ServiceConfigurationError, processing_summary, response_summary, write_failure
 from .progress import ProgressReporter
 from .file_ops import file_diagnostic
 
@@ -62,9 +62,22 @@ def processing_error(exc, phase):
         else:
             code, hint = 'FILE_IO_ERROR', '저장 공간과 폴더 접근 권한을 확인하세요.'
     else:
-        code, hint = 'UNEXPECTED_PROCESSING_ERROR', '서버 연결과 설치 상태를 확인하세요.'
+        import sqlite3
+        from email.errors import MessageError
+        if isinstance(exc,sqlite3.Error):
+            code,hint='LOCAL_DATABASE_ERROR','PC 검색 DB를 처리하지 못했습니다. 저장 공간·파일 접근 상태를 확인하고 보존된 폴더에서 기존 백업 갱신을 실행하세요.'
+        elif isinstance(exc,UnicodeError):
+            code,hint='LOCAL_TEXT_ENCODING_ERROR','메일 문자 인코딩을 처리하지 못했습니다. 보존된 폴더에서 기존 백업 갱신을 실행하세요.'
+        elif isinstance(exc,MemoryError):
+            code,hint='MEMORY_LIMIT','PC 메모리가 부족합니다. 다른 프로그램을 닫고 64비트 Python에서 기존 백업 갱신을 실행하세요.'
+        elif isinstance(exc,MessageError):
+            code,hint='MAIL_FORMAT_ERROR','메일 형식을 처리하지 못했습니다. 보존된 원본과 오류 기록을 확인하세요.'
+        else:
+            code, hint = 'UNEXPECTED_PROCESSING_ERROR', ('PC에 저장된 자료의 색인·메일 변환 처리를 확인하세요. 보존된 폴더에서 기존 백업 갱신을 실행할 수 있습니다.'
+                if phase=='Windows DB·메일 검색 색인 생성' else '서버 연결과 설치 상태를 확인하세요.')
     error = CollectionError('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))
     error.filesystem_diagnostic = file_diagnostic(exc)
+    error.processing_diagnostic = processing_summary(exc)
     return error
 
 
@@ -368,6 +381,7 @@ class PreparedDBCollector(Collector):
                 reason = exc if isinstance(exc,CollectionError) else processing_error(exc,self.phase)
                 error = CollectionError(str(reason)+'\n검증된 원본은 보존했습니다. ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(destination)+' [LOCAL_INDEX_PENDING]')
                 error.filesystem_diagnostic = getattr(reason,'filesystem_diagnostic',None)
+                error.processing_diagnostic = getattr(reason,'processing_diagnostic',None)
                 raise error from None
             self.checkpoint()
             self.progress('finalize')

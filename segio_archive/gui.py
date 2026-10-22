@@ -220,6 +220,11 @@ class App(tk.Tk):
                         self.last_archive=value
                         self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
                         webbrowser.open((value/'index.html').as_uri())
+                        manifest=json.loads((value/'manifest.json').read_text(encoding='utf-8'))
+                        notice=self.mail_warning(value,manifest)
+                        if notice:
+                            self.status.set('기존 백업 갱신 완료 · 일부 메일 확인 필요')
+                            messagebox.showwarning('백업 갱신 완료 · 메일 확인 필요',notice)
                     elif event == 'archive_error':
                         self.finish_progress(self.progress_detail + ' · 중단 또는 오류', False)
                         self.status.set(value)
@@ -229,13 +234,18 @@ class App(tk.Tk):
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
                         self.finish_progress('백업 실패' if manifest['state']=='failed' else '백업 완료', manifest['state']!='failed')
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
+                        notice=self.mail_warning(value,manifest)
                         if manifest["state"] == "failed":
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
                             messagebox.showerror("수집 실패", detail)
                         elif manifest.get('server_cleanup',{}).get('state')=='pending':
                             self.finish_progress('PC 백업 완료 · 서버 임시 ZIP 삭제 미확인', True)
                             self.status.set('PC 백업 완료 · 서버 임시 ZIP 삭제 미확인 · '+str(value))
-                            messagebox.showwarning('서버 정리 확인','PC 백업은 저장됐지만 서버 임시 ZIP 삭제를 확인하지 못했습니다. 서버 정리 상태와 프로그램 로그를 확인하세요.\n저장 폴더: '+str(value))
+                            messagebox.showwarning('서버 정리 확인','PC 백업은 저장됐지만 서버 임시 ZIP 삭제를 확인하지 못했습니다. 서버 정리 상태와 프로그램 로그를 확인하세요.\n저장 폴더: '+str(value)+ ('\n\n'+notice if notice else ''))
+                        elif notice:
+                            self.finish_progress('백업 완료 · 일부 메일 확인 필요',True)
+                            self.status.set('백업 완료 · 일부 메일 확인 필요 · '+str(value))
+                            messagebox.showwarning('백업 완료 · 메일 확인 필요',notice)
                         else:
                             messagebox.showinfo("백업 완료", "백업이 완료되었습니다.\n저장 폴더: "+str(value))
                     else:
@@ -246,6 +256,16 @@ class App(tk.Tk):
             pass
         self.refresh_progress_text()
         self.after(100, self.poll)
+
+    def mail_warning(self,path,manifest):
+        info=manifest.get('portable_mail',{})
+        count=info.get('warning_count',0)
+        if type(count) is not int or count<=0:return None
+        raw=info.get('raw_only_count',0)
+        raw=raw if type(raw) is int and 0<=raw<=count else 0
+        return ('원본 백업과 목록 생성을 완료했습니다. 메일 %d건에 형식 확인 사항이 있습니다.\n'%count+
+                ('본문·첨부 자동 변환을 완료하지 못한 %d건은 원본 EML로 보존했습니다.\n'%raw if raw else '')+
+                '보관함의 ‘확인 필요 메일 목록’에서 확인하세요.\n저장 폴더: '+str(path))
 
     def refresh_progress_text(self):
         if self.started_at is not None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from email.header import Header, decode_header
+from email.errors import MessageError
 from pathlib import Path
 
 from .web import CollectionError
@@ -22,12 +23,19 @@ def decode_bytes(data, charset=None):
     return data.decode('utf-8', errors='replace')
 
 
-def header_text(value):
+def header_text(value, issues=None):
+    raw=str(value or '')
     try:
-        return ''.join(decode_bytes(part, charset) if isinstance(part, bytes) else part
-                       for part, charset in decode_header(value if isinstance(value, Header) else str(value or '')))
-    except (ValueError, LookupError):
-        return str(value or '')
+        result=''.join(decode_bytes(part, charset) if isinstance(part, bytes) else part
+                       for part, charset in decode_header(value if isinstance(value, Header) else raw))
+    except (MessageError, ValueError, LookupError):
+        if issues is not None:issues.add('header_encoding')
+        result=raw
+    # Preserve an invalid code point visibly in derived text. Raw RFC822/MBOX
+    # bytes remain untouched; SQLite and HTML cannot store lone surrogates.
+    safe=result.encode('utf-8','backslashreplace').decode('utf-8')
+    if safe!=result and issues is not None:issues.add('header_unicode')
+    return safe
 
 
 def reconcile_mail_source(root, source, files, checkpoint):

@@ -23,6 +23,7 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'TIMEOUT','LOGIN_FRAME_TRANSITION','BROWSER_CONNECTION_ERROR',
                'FILE_ACCESS_DENIED','FILE_IO_ERROR','DISK_FULL','FILE_TOO_LARGE',
                'UNEXPECTED_PROCESSING_ERROR','INVALID_JSON','LOCAL_INDEX_PENDING',
+               'LOCAL_DATABASE_ERROR','LOCAL_TEXT_ENCODING_ERROR','MEMORY_LIMIT','MAIL_FORMAT_ERROR',
                'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR',
                'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_CLOSED',
                'ERR_NAME_NOT_RESOLVED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID',
@@ -31,6 +32,51 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
 SERVICE_CHECKS = {'config_exists','config_readable','config_json_object',
                   'php_path_restriction','php_safe_mode'}
 BRIDGE_STATES = {'available','not_found','login_required','service_not_configured','unavailable'}
+PROCESSING_TYPES = {'HeaderParseError','MessageError','Error','UnicodeEncodeError','UnicodeDecodeError',
+                    'UnicodeError','ValueError','TypeError','AttributeError','KeyError','IndexError',
+                    'RecursionError','MemoryError','OperationalError','IntegrityError','DatabaseError',
+                    'ParserRejectedMarkup','RuntimeError','AssertionError','PermissionError','OSError'}
+PROCESSING_SITES = {
+    'mail_import':{'header_text','decode_bytes','build_local_catalog','reconcile_mail_source'},
+    'compact_mail':{'build_compact_catalog','read_headers','mbox_spans','digest_file','search'},
+    'portable_mail':{'render_record','render_message','render_raw_record','mime_parts','headers','decoded',
+                     'safe_html','sanitized_html','write_generated','build_portable_mail','prepare_archive',
+                     'local_path','add','__enter__','__exit__','open'},
+    'search_page':{'install_search_page','write','script_json'},
+    'document_page':{'upgrade_documents'},
+    'index_metadata':{'__init__','item_date'},
+    'mail_folders':{'__init__','info','boxes'},
+    'db_client':{'receive','finalize_download','unpack_verified'},
+}
+
+
+def safe_processing(data):
+    kind=data.get('exception_type')
+    result={'exception_type':kind if isinstance(kind,str) and kind in PROCESSING_TYPES else 'Exception'}
+    site=data.get('site')
+    if (isinstance(site,dict) and isinstance(site.get('module'),str) and site['module'] in PROCESSING_SITES and
+            isinstance(site.get('function'),str) and site['function'] in PROCESSING_SITES[site['module']] and
+            type(site.get('line')) is int and 1<=site['line']<=10000000):
+        result['site']={key:site[key] for key in ('module','function','line')}
+    if type(data.get('sqlite_errorcode')) is int and 0<=data['sqlite_errorcode']<=0x7fffffff:
+        result['sqlite_errorcode']=data['sqlite_errorcode']
+    return result
+
+
+def processing_summary(exception):
+    data={'exception_type':type(exception).__name__}
+    trace=exception.__traceback__
+    while trace is not None:
+        frame=trace.tb_frame
+        module=frame.f_globals.get('__name__','')
+        key=module.removeprefix('segio_archive.')
+        function=frame.f_code.co_name
+        if module=='segio_archive.'+key and key in PROCESSING_SITES and function in PROCESSING_SITES[key]:
+            data['site']={'module':key,'function':function,'line':trace.tb_lineno}
+        trace=trace.tb_next
+    code=getattr(exception,'sqlite_errorcode',None)
+    if type(code) is int:data['sqlite_errorcode']=code
+    return safe_processing(data)
 
 
 def safe_response(data):
@@ -99,6 +145,8 @@ def write_failure(output, exception, phase):
               'phase':phase if phase in PHASES else 'unknown','error':code}
     if isinstance(exception,BridgeResponseError):
         record['response'] = safe_response(exception.diagnostic)
+    data=getattr(exception,'processing_diagnostic',None)
+    if isinstance(data,dict):record['processing']=safe_processing(data)
     checks = getattr(exception,'status_checks',None)
     if isinstance(checks,dict):
         record['status_checks'] = {

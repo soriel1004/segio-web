@@ -115,6 +115,27 @@ class ProgressTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('DISPLAY') or sys.platform=='win32', 'A GUI display is required')
 class ProgressWindowTests(unittest.TestCase):
+    def test_raw_preserved_mail_warnings_are_visible_at_backup_completion(self):
+        from segio_archive.gui import App
+        app=App()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                (root/'manifest.json').write_text(json.dumps({'state':'collected_with_warnings','warnings':[],
+                    'portable_mail':{'warning_count':3,'raw_only_count':1}}))
+                app.running=True
+                app.begin_progress('메일 변환')
+                with patch('segio_archive.gui.messagebox.showwarning') as warning,patch('segio_archive.gui.messagebox.showinfo') as success:
+                    app.events.put(('done',root))
+                    app.poll()
+                warning.assert_called_once()
+                success.assert_not_called()
+                self.assertIn('3건',warning.call_args.args[1])
+                self.assertIn('원본 EML',warning.call_args.args[1])
+                self.assertIn('확인 필요',app.status.get())
+        finally:
+            app.running=False
+            app.close()
     def test_stop_requires_confirmation_and_marks_only_this_backup_for_discard(self):
         from segio_archive.gui import App
         from segio_archive.web import Config

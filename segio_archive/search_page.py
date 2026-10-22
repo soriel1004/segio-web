@@ -75,7 +75,10 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
                 chunks.append(name)
                 done+=len(rows)
                 report('search',done,total,unit='messages')
-    config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes, 'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
+    warning_count=manifest.get('portable_mail',{}).get('warning_count',0)
+    config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes,
+              'mail_warning_count':warning_count if type(warning_count) is int and warning_count>=0 else 0,
+              'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
     if manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1':
         manifest['viewer']='local-db/1'
@@ -136,5 +139,5 @@ function chooseScope(value){kind=value;mailbox=category='';page=0;locationHash()
 $('#search-form').onsubmit=event=>{event.preventDefault();query=q.value.trim().slice(0,200);if(kind!==$('#scope').value){mailbox=category=''}kind=$('#scope').value;page=0;locationHash();load()};
 $('#scope').onchange=()=>chooseScope($('#scope').value);
 for(const key of ['all','approval','mail']){$('#tab-'+key).onclick=()=>{$('#scope').value=key==='all'?'':key;chooseScope($('#scope').value)}}
-$('#prev').onclick=()=>{if(page>0){page--;load()}};$('#next').onclick=()=>{page++;load()};$('#notice').textContent='백업 폴더에서 결재·메일 본문·첨부를 바로 열 수 있습니다. 폴더 전체를 함께 보관하세요.';load();
+$('#prev').onclick=()=>{if(page>0){page--;load()}};$('#next').onclick=()=>{page++;load()};$('#notice').textContent='백업 폴더에서 결재·메일 본문·첨부를 바로 열 수 있습니다. 폴더 전체를 함께 보관하세요.';if(config.mail_warning_count){$('#notice').append(document.createTextNode(' 메일 '+config.mail_warning_count+'건은 형식 확인이 필요합니다. '));const report=document.createElement('a');report.href='mail/processing-issues.html';report.textContent='확인 필요 메일 목록';$('#notice').append(report)}load();
 </script></html>'''

@@ -17,6 +17,25 @@ def response(status,media,body):
 
 
 class ClientDiagnosticTests(unittest.TestCase):
+    def test_processing_details_are_allowlisted_and_database_memory_encoding_errors_are_distinct(self):
+        import sqlite3
+        from segio_archive.db_client import processing_error
+        with tempfile.TemporaryDirectory() as tmp:
+            for exception,code in ((sqlite3.OperationalError('PRIVATE SQL'),'LOCAL_DATABASE_ERROR'),
+                                   (MemoryError('PRIVATE MAIL'),'MEMORY_LIMIT'),
+                                   (UnicodeEncodeError('utf-8','PRIVATE\udcff',7,8,'PRIVATE'),'LOCAL_TEXT_ENCODING_ERROR')):
+                error=processing_error(exception,'Windows DB·메일 검색 색인 생성')
+                record=json.loads(write_failure(Path(tmp),error,'Windows DB·메일 검색 색인 생성').read_bytes())
+                self.assertEqual(record['error'],code)
+                self.assertNotIn('PRIVATE',json.dumps(record))
+            error=RuntimeError('PRIVATE')
+            error.processing_diagnostic={'exception_type':'PRIVATE_TYPE',
+                'site':{'module':'portable_mail','function':'render_message','line':123,'password':'PRIVATE'},
+                'sqlite_errorcode':10,'message':'PRIVATE','path':'PRIVATE'}
+            record=json.loads(write_failure(Path(tmp),error,'Windows DB·메일 검색 색인 생성').read_bytes())
+            self.assertEqual(record['processing'],{'exception_type':'Exception',
+                'site':{'module':'portable_mail','function':'render_message','line':123},'sqlite_errorcode':10})
+            self.assertNotIn('PRIVATE',json.dumps(record))
     def client(self,output):
         client=DBCollector(Config('https://example.invalid/','employee',output))
         client.context=Mock()
