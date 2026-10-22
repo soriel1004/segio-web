@@ -266,8 +266,14 @@ class App(tk.Tk):
         if type(count) is not int or count<=0:return None
         raw=info.get('raw_only_count',0)
         raw=raw if type(raw) is int and 0<=raw<=count else 0
-        return ('원본 백업과 목록 생성을 완료했습니다. 메일 %d건에 형식 확인 사항이 있습니다.\n'%count+
+        unavailable=info.get('unavailable_attachment_count',0)
+        unavailable=unavailable if type(unavailable) is int and unavailable>=0 else 0
+        source_only=info.get('source_only_count',0)
+        source_only=source_only if type(source_only) is int and source_only>=0 else 0
+        return ('백업 목록을 생성했습니다. 메일 %d건에 변환·첨부 확인 사항이 있습니다.\n'%count+
                 ('본문·첨부 자동 변환을 완료하지 못한 %d건은 원본 EML로 보존했습니다.\n'%raw if raw else '')+
+                ('첨부 %d개는 확보 상태를 확인하지 못했습니다. 보안 기록·미확보 사유를 확인하세요. 자동 복원하지 않았습니다.\n'%unavailable if unavailable else '')+
+                ('메일 %d건은 기존 원본 자료만 유지하며 별도 EML을 생성하지 않았습니다.\n'%source_only if source_only else '')+
                 '보관함의 ‘확인 필요 메일 목록’에서 확인하세요.\n저장 폴더: '+str(path))
 
     def refresh_progress_text(self):

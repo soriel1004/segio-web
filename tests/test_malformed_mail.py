@@ -170,7 +170,7 @@ class MalformedMailTests(unittest.TestCase):
                     try:
                         page=browser.new_page()
                         page.goto(viewer.url)
-                        expect(page.locator('#notice')).to_contain_text('1건은 형식 확인')
+                        expect(page.locator('#notice')).to_contain_text('1건은 변환·첨부 확인')
                         page.get_by_role('link',name='확인 필요 메일 목록').click()
                         expect(page.locator('h1')).to_have_text('메일 변환 확인 사항')
                         self.assertEqual(page.locator('script').count(),0)

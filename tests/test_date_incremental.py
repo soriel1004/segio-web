@@ -202,6 +202,24 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertEqual(before,self.snapshot())
         self.assertEqual(search(target,kind='mail')['total'],3)
 
+    def test_quarantined_attachment_is_not_restored_by_incremental_backup(self):
+        from segio_archive import portable_mail
+        manifest=json.loads((self.old/'manifest.json').read_bytes())
+        attachment=next(name for name in manifest['files'] if '/attachments/' in name)
+        (self.old/attachment).unlink()
+        before=self.snapshot()
+        target=self.export(2,self.base)
+        write=portable_mail.write_generated
+        def no_restore(root,name,*args):
+            if name==attachment:raise AssertionError('Deleted attachment was restored')
+            return write(root,name,*args)
+        with patch.object(portable_mail,'write_generated',side_effect=no_restore):
+            self.prepare(target)
+        self.assertEqual(before,self.snapshot())
+        result=json.loads((target/'manifest.json').read_bytes())
+        self.assertEqual(result['portable_mail']['unavailable_attachment_count'],1)
+        self.assertNotIn(attachment,result['files'])
+
     @unittest.skipUnless(os.environ.get('SEGIO_TEST_PYTHON26'),'Real Python 2.6 is required')
     def test_real_python26_date_delta_reads_only_recent_native_files(self):
         # Real ctime cannot be backdated with utime; cross the next whole second.

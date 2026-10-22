@@ -14,6 +14,7 @@ LABELS = {
     'reuse': '이전 백업의 변경 없는 메일 복사·검증',
     'cancel_cleanup': '백업 중단·이번 작업 자료 정리',
     'merge': '기존 백업 반영 준비', 'merge_commit': '기존 백업 폴더에 추가 자료 반영',
+    'attachment_audit': '메일 첨부 확보 상태 확인',
 }
 
 

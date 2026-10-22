@@ -151,6 +151,7 @@ class DateBaseline(Baseline):
     def prepare(self, destination, checkpoint, report, log, *, approvals=True, mail=True):
         """Keep old raw/pages immutable; only private metadata is rewritten."""
         from .db_client import safe_member
+        from .attachment_safety import attachment_io, attachment_name, AttachmentUnavailable
         destination = Path(destination)
         current = json.loads((destination/'manifest.json').read_bytes())
         incoming_sources = (json.loads((destination/'mail/sources.json').read_bytes())['sources'] if mail else [])
@@ -175,15 +176,22 @@ class DateBaseline(Baseline):
             if name in new_files and not name.startswith('mail/raw/'):
                 continue
             source = self.raw_path(name)
-            if source.stat().st_size != expected['bytes']:
-                raise CollectionError('기존 백업 파일의 크기가 변경되었습니다. 파일 무결성을 검사하세요.')
+            try:
+                actual=attachment_io(source.stat,name,missing=True)
+                if actual.st_size != expected['bytes']:
+                    if attachment_name(name):continue
+                    raise CollectionError('기존 백업 파일의 크기가 변경되었습니다. 파일 무결성을 검사하세요.')
+            except AttachmentUnavailable:
+                continue  # The renderer records the absent attachment, never restores it.
             target = destination/name
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 raise CollectionError('기존 백업 반영 경로가 중복됩니다.')
             if name.startswith(('mail/raw/', 'mail/offline/')):
                 try:
-                    os.link(source, target)
+                    attachment_io(lambda:os.link(source, target),name,missing=True)
+                except AttachmentUnavailable:
+                    continue
                 except OSError as exc:
                     if exc.errno not in (errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EACCES):
                         raise

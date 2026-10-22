@@ -88,7 +88,7 @@ class SearchPageTests(unittest.TestCase):
                 viewer=Viewer(root)
                 viewer.close()
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/6')
+            self.assertEqual(updated['browser_index'],'offline-search/7')
             self.assertEqual(updated['files']['mail/original.mbox'],old['files']['mail/original.mbox'])
             self.assertEqual(digest_file(root/'catalog.sqlite3'),old['files']['catalog.sqlite3'])
             self.assertTrue(verify_archive(root)['ok'])

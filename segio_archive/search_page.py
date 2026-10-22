@@ -9,7 +9,7 @@ from .archive import atomic_write
 from .mail_folders import MailFolders
 from .index_metadata import IndexMetadata, CATEGORIES, item_date
 
-VERSION = 'offline-search/6'
+VERSION = 'offline-search/7'
 CHUNK_SIZE = 500
 
 
@@ -139,5 +139,5 @@ function chooseScope(value){kind=value;mailbox=category='';page=0;locationHash()
 $('#search-form').onsubmit=event=>{event.preventDefault();query=q.value.trim().slice(0,200);if(kind!==$('#scope').value){mailbox=category=''}kind=$('#scope').value;page=0;locationHash();load()};
 $('#scope').onchange=()=>chooseScope($('#scope').value);
 for(const key of ['all','approval','mail']){$('#tab-'+key).onclick=()=>{$('#scope').value=key==='all'?'':key;chooseScope($('#scope').value)}}
-$('#prev').onclick=()=>{if(page>0){page--;load()}};$('#next').onclick=()=>{page++;load()};$('#notice').textContent='백업 폴더에서 결재·메일 본문·첨부를 바로 열 수 있습니다. 폴더 전체를 함께 보관하세요.';if(config.mail_warning_count){$('#notice').append(document.createTextNode(' 메일 '+config.mail_warning_count+'건은 형식 확인이 필요합니다. '));const report=document.createElement('a');report.href='mail/processing-issues.html';report.textContent='확인 필요 메일 목록';$('#notice').append(report)}load();
+$('#prev').onclick=()=>{if(page>0){page--;load()}};$('#next').onclick=()=>{page++;load()};$('#notice').textContent='백업 폴더에서 결재·메일 본문·첨부를 바로 열 수 있습니다. 폴더 전체를 함께 보관하세요.';if(config.mail_warning_count){$('#notice').append(document.createTextNode(' 메일 '+config.mail_warning_count+'건은 변환·첨부 확인이 필요합니다. '));const report=document.createElement('a');report.href='mail/processing-issues.html';report.textContent='확인 필요 메일 목록';$('#notice').append(report)}load();
 </script></html>'''

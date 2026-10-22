@@ -22,6 +22,7 @@ from .archive import atomic_write, safe_name
 from .compact_mail import digest_file
 from .mail_import import decode_bytes, header_text
 from .web import CollectionError
+from .attachment_safety import AttachmentStatus, AttachmentUnavailable, attachment_io, attachment_name, security_error, ISSUES as ATTACHMENT_ISSUES
 
 VERSION = 'static-mail/1'
 BLOCK = 65536
@@ -35,6 +36,7 @@ ISSUES = {
     'transfer_encoding':'지원하지 않는 메일 전송 인코딩입니다.',
     'html_as_text':'메일 HTML을 해석하지 못해 HTML 원문을 텍스트로 표시했습니다.',
 }
+ISSUES.update(ATTACHMENT_ISSUES)
 ISSUE_REPORT='mail/processing-issues.html'
 
 
@@ -174,7 +176,7 @@ def decoded(stream, start, end, encoding, checkpoint):
 def safe_html(text, images, issues=None):
     try:
         return sanitized_html(text,images)
-    except (ParserRejectedMarkup,RecursionError):
+    except (ParserRejectedMarkup,RecursionError,ValueError):
         if issues is not None:issues.add('html_as_text')
         return '<pre>'+html.escape(text)+'</pre>'
 
@@ -182,9 +184,13 @@ def safe_html(text, images, issues=None):
 def sanitized_html(text, images):
     soup=BeautifulSoup(text,'html.parser')
     for tag in soup.select('script,style,iframe,object,embed,svg,math,form,template,head'):
-        tag.decompose()
+        if tag.parent is not None:tag.decompose()
     allowed=set('p br div span table thead tbody tfoot tr td th ul ol li strong em b i u s hr blockquote pre code h1 h2 h3 h4 h5 h6 img a'.split())
     for tag in list(soup.find_all(True)):
+        # Removing a malformed parent can also decompose descendants already
+        # present in this snapshot. unwrap() rejects detached elements.
+        if tag.parent is None or tag.name is None:
+            continue
         if tag.name not in allowed:
             tag.unwrap()
             continue
@@ -203,8 +209,9 @@ def sanitized_html(text, images):
             tag['alt']=old.get('alt','본문 이미지')
         if tag.name in ('td','th'):
             for name in ('colspan','rowspan'):
-                if str(old.get(name,'')).isdigit():
-                    tag[name]=str(min(1000,int(old[name])))
+                value=str(old.get(name,''))
+                if re.fullmatch(r'[0-9]{1,4}',value):
+                    tag[name]=str(min(1000,int(value)))
     return str(soup)
 
 
@@ -216,17 +223,30 @@ def write_generated(root, name, parts, generated, checkpoint):
     digest,size=hashlib.sha256(),0
     next_space_check=0
     try:
-        with temporary.open('wb') as output:
+        output=attachment_io(lambda:temporary.open('wb'),name)
+        try:
             for part in parts:
                 checkpoint()
                 if size>=next_space_check:
                     require_space(root,len(part),'메일 바로보기')
                     next_space_check=size+64*1024*1024
-                output.write(part)
+                attachment_io(lambda:output.write(part),name)
                 digest.update(part)
                 size+=len(part)
+        except BaseException:
+            # A secondary close error must not downgrade a raw-source read
+            # failure, cancellation or disk error to an attachment warning.
+            try:output.close()
+            except OSError:pass
+            raise
+        else:
+            attachment_io(output.close,name)
         from .file_ops import replace_file
-        replace_file(temporary,path,checkpoint)
+        attachment_io(lambda:replace_file(temporary,path,checkpoint),name,
+                      missing=temporary.parent.is_dir() and path.parent.is_dir())
+        actual=attachment_io(path.stat,name,missing=True)
+        if attachment_name(name) and actual.st_size!=size:
+            raise AttachmentUnavailable('attachment_unavailable')
     finally:
         try:temporary.unlink(missing_ok=True)
         except OSError:pass
@@ -242,9 +262,12 @@ def render_record(root, manifest, stream, record, checkpoint):
 
 def render_message(root, manifest, stream, record, checkpoint):
     directory=Path(page_path(record['id'])).parent.as_posix()
+    previous_attachments=(local_path(root,directory)/'attachments').is_dir()
+    cache_matched=False
     local_path(root,directory).mkdir(parents=True,exist_ok=True)
     source_info=manifest['files'][record['source']]
     fingerprint=[VERSION,record['source'],record['begin'],record['end'],source_info['sha256']]
+    status=AttachmentStatus(root,directory,fingerprint)
     state_path=local_path(root,directory+'/state.json')
     try:
         state=json.loads(state_path.read_text(encoding='utf-8'))
@@ -253,13 +276,34 @@ def render_message(root, manifest, stream, record, checkpoint):
                 (state.get('raw_only') is True and not codes)):
             raise ValueError('Invalid derived mail state')
         if (state['source']==fingerprint and directory+'/index.html' in state['files']
-                and all(name.startswith(directory+'/') for name in state['files'])
-                and all(digest_file(local_path(root,name),checkpoint)==value for name,value in state['files'].items())):
-            manifest['files'].update(state['files'])
-            manifest['files'][directory+'/state.json']=digest_file(state_path,checkpoint)
-            return {'issues':[code for code in state.get('issues',[]) if code in ISSUES],
-                    'raw_only':state.get('raw_only') is True}
-    except (OSError,ValueError,KeyError,TypeError,AttributeError):
+                and all(name.startswith(directory+'/') for name in state['files'])):
+            cache_matched=True
+            valid=True
+            for name,value in state['files'].items():
+                checkpoint()
+                if name in status.skipped:
+                    valid=False
+                    continue
+                try:
+                    actual=attachment_io(lambda:digest_file(local_path(root,name),checkpoint),name,missing=True)
+                    if actual!=value:
+                        if attachment_name(name):status.record(name,'attachment_unavailable')
+                        valid=False
+                except AttachmentUnavailable as exc:
+                    status.record(name,exc.issue)
+                    valid=False
+                except FileNotFoundError:
+                    if name.endswith('/original.eml'):
+                        raise CollectionError('보존했던 원본 EML이 없어졌습니다. 보안 프로그램의 격리·삭제 기록을 확인하세요. 자동 재생성을 중단했습니다.') from None
+                    valid=False
+            if valid:
+                manifest['files'].update(state['files'])
+                manifest['files'][directory+'/state.json']=digest_file(state_path,checkpoint)
+                return {'issues':codes,'raw_only':state.get('raw_only') is True,
+                        'source_only':state.get('source_only') is True,'unavailable_attachments':len(status.skipped)}
+    except OSError as exc:
+        if security_error(exc):raise
+    except (ValueError,KeyError,TypeError,AttributeError):
         pass
     generated={}
 
@@ -270,10 +314,10 @@ def render_message(root, manifest, stream, record, checkpoint):
         message,parts=mime_parts(stream,record['begin'],record['end'],checkpoint)
     except (MessageError,ValueError,LookupError):
         raise MailFormatError('mime_structure') from None
-    issues=set()
+    issues=set(status.skipped.values())
     for field in ('Subject','From','To','Date','Cc'):
         header_text(message.get(field),issues)
-    plain,rich,attachments,images,notes=[],[],[],{},[]
+    plain,rich,attachments,images,notes,unavailable=[],[],[],{},[],[]
     text_bytes = 0
     for number,(part,start,end) in enumerate(parts):
         checkpoint()
@@ -288,7 +332,36 @@ def render_message(root, manifest, stream, record, checkpoint):
         if filename or part.get_content_disposition()=='attachment' or not is_text:
             filename=header_text(filename,issues) or ('message.eml' if part.get_content_type()=='message/rfc822' else 'attachment.bin')
             name=f'attachments/{number}-{safe_name(filename,80)}'
-            write(directory+'/'+name,payload)
+            relative=directory+'/'+name
+            if relative in status.skipped:
+                unavailable.append(filename)
+                continue
+            try:
+                if previous_attachments and not cache_matched:
+                    # Old releases could stop after writing attachments but
+                    # before saving state.json. Do not recreate a disappeared
+                    # attachment from that incomplete attempt. Verify/reuse only
+                    # the bytes still present, without rewriting them.
+                    target=local_path(root,relative)
+                    if not target.exists():
+                        raise AttachmentUnavailable('attachment_unverified')
+                    digest,size=hashlib.sha256(),0
+                    for block in payload:
+                        checkpoint()
+                        digest.update(block)
+                        size+=len(block)
+                    expected={'bytes':size,'sha256':digest.hexdigest()}
+                    actual=attachment_io(lambda:digest_file(target,checkpoint),relative,missing=True)
+                    if actual!=expected:
+                        raise AttachmentUnavailable('attachment_unverified')
+                    generated[relative]=expected
+                else:
+                    write(relative,payload)
+            except AttachmentUnavailable as exc:
+                status.record(relative,exc.issue)
+                issues.add(exc.issue)
+                unavailable.append(filename)
+                continue
             attachments.append((filename,name))
             if cid and part.get_content_type() in ('image/png','image/jpeg','image/gif','image/webp'):
                 images[cid]=quote(name,safe='/')
@@ -304,9 +377,26 @@ def render_message(root, manifest, stream, record, checkpoint):
             text_bytes += len(data)
             if text:
                 (rich if part.get_content_type()=='text/html' else plain).append(text)
+    # Reconcile files removed after creation while other MIME parts were read.
+    available=[]
+    for filename,name in attachments:
+        relative=directory+'/'+name
+        try:
+            actual=attachment_io(local_path(root,relative).stat,relative,missing=True)
+            if actual.st_size!=generated[relative]['bytes']:
+                raise AttachmentUnavailable('attachment_unavailable')
+            available.append((filename,name))
+        except AttachmentUnavailable as exc:
+            status.record(relative,exc.issue)
+            issues.add(exc.issue)
+            unavailable.append(filename)
+            generated.pop(relative,None)
+            images={cid:src for cid,src in images.items() if src!=quote(name,safe='/')}
+    attachments=available
     content='\n'.join(safe_html(text,images,issues) for text in rich) if rich else '<pre>'+html.escape('\n'.join(plain) or '본문이 없는 메일입니다.')+'</pre>'
     notes.extend(ISSUES[code] for code in sorted(issues))
     attachment_html=''.join('<li><a class="attachment" target="_blank" rel="noopener noreferrer" href="'+html.escape(quote(name,safe='/'),quote=True)+'">'+html.escape(filename)+'</a></li>' for filename,name in attachments)
+    attachment_html+=''.join('<li class="unavailable">'+html.escape(filename)+' — 첨부 미확보 · 자동 재추출하지 않음</li>' for filename in unavailable)
     extra=''.join('<p>'+html.escape(note)+'</p>' for note in dict.fromkeys(notes))
     title=html.escape(record['title'])
     page=f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -316,15 +406,43 @@ def render_message(root, manifest, stream, record, checkpoint):
 <h1>{title}</h1><p>보낸 사람: {html.escape(record['sender'])}<br>받는 사람: {html.escape(record['receiver'])}<br>참조: {html.escape(header_text(message.get('Cc')))}<br>일시: {html.escape(record['date'])}</p>
 <main>{content}</main>{extra}<h2>첨부</h2><ul>{attachment_html or '<li>첨부 파일 없음</li>'}</ul></html>'''
     write(directory+'/index.html',[page.encode('utf-8')])
-    atomic_write(state_path,json.dumps({'source':fingerprint,'files':generated,'issues':sorted(issues),'raw_only':False},ensure_ascii=False).encode('utf-8'))
+    for name in status.skipped:manifest['files'].pop(name,None)
+    if status.path.exists():
+        generated[directory+'/attachment-status.json']=digest_file(status.path,checkpoint)
+    atomic_write(state_path,json.dumps({'source':fingerprint,'files':generated,'issues':sorted(issues),'raw_only':False,
+                                       'unavailable_attachments':len(status.skipped)},ensure_ascii=False).encode('utf-8'))
     generated[directory+'/state.json']=digest_file(state_path,checkpoint)
     manifest['files'].update(generated)
-    return {'issues':sorted(issues),'raw_only':False}
+    return {'issues':sorted(issues),'raw_only':False,'unavailable_attachments':len(status.skipped)}
 
 
 def render_raw_record(root,manifest,stream,record,checkpoint,issue):
     """Keep an undecodable message exact; never publish partial attachments."""
     directory=Path(page_path(record['id'])).parent.as_posix()
+    fingerprint=[VERSION,record['source'],record['begin'],record['end'],manifest['files'][record['source']]['sha256']]
+    status=AttachmentStatus(root,directory,fingerprint)
+    if status.skipped:
+        # An EML copy would recreate the content of a security-blocked
+        # attachment. Keep the existing source only and emit an inert notice.
+        codes=sorted({issue,*status.skipped.values()})
+        generated={}
+        page=('<!doctype html><html lang="ko"><meta charset="utf-8">'
+              '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; base-uri \'none\'">'
+              '<title>'+html.escape(record['title'])+'</title><a href="../../../index.html#mail">메일 목록</a>'
+              '<h1>'+html.escape(record['title'])+'</h1><p>본문·첨부 자동 변환을 완료하지 못했습니다. '
+              '첨부 미확보 기록이 있어 별도 EML과 차단된 첨부를 다시 생성하지 않았습니다. '
+              '기존 원본 자료와 보안 프로그램의 보호 기록을 확인하세요.</p><ul>'+
+              ''.join('<li>'+ISSUES[code]+'</li>' for code in codes)+'</ul></html>')
+        write_generated(root,directory+'/index.html',[page.encode()],generated,checkpoint)
+        generated[directory+'/attachment-status.json']=digest_file(status.path,checkpoint)
+        for name in status.skipped:manifest['files'].pop(name,None)
+        state={'source':fingerprint,'files':generated,'issues':codes,'raw_only':False,'source_only':True,
+               'unavailable_attachments':len(status.skipped)}
+        state_path=root/directory/'state.json'
+        atomic_write(state_path,json.dumps(state,ensure_ascii=False).encode())
+        generated[directory+'/state.json']=digest_file(state_path,checkpoint)
+        manifest['files'].update(generated)
+        return {'issues':codes,'raw_only':False,'source_only':True,'unavailable_attachments':len(status.skipped)}
     path=local_path(root,directory)
     for current in (path,*path.parents):
         if current==root:break
@@ -362,7 +480,7 @@ class IssueReport:
         self.root,self.manifest,self.checkpoint=root,manifest,checkpoint
         self.path=local_path(root,ISSUE_REPORT)
         self.temporary=self.path.with_suffix('.html.partial')
-        self.count,self.raw_only=0,0
+        self.count,self.raw_only,self.source_only,self.unavailable=0,0,0,0
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True,exist_ok=True)
@@ -385,6 +503,9 @@ class IssueReport:
         if not codes:return
         self.count+=1
         self.raw_only+=int(result.get('raw_only') is True)
+        self.source_only+=int(result.get('source_only') is True)
+        unavailable=result.get('unavailable_attachments',0)
+        self.unavailable+=unavailable if type(unavailable) is int and unavailable>=0 else 0
         link=page_path(record['id'])[len('mail/'):]
         body='<li><a href="'+link+'">'+html.escape(record['title'])+'</a><ul>'
         body+=''.join('<li>'+ISSUES[code]+'</li>' for code in codes)+'</ul></li>'
@@ -421,16 +542,24 @@ def retained_result(root, manifest, record, checkpoint):
             page_path(record['id']) not in state.get('files',{}) or
             any(value != manifest['files'].get(name) for name,value in state['files'].items())):
         raise CollectionError('이전 메일 바로보기와 원본 기록이 일치하지 않습니다. 먼저 기존 백업 갱신을 실행하세요.')
-    return {'issues':codes,'raw_only':state.get('raw_only') is True}
+    for name,expected in state['files'].items():
+        actual=attachment_io(local_path(root,name).stat,name,missing=True)
+        if actual.st_size!=expected['bytes']:
+            if attachment_name(name):
+                raise AttachmentUnavailable('attachment_unavailable')
+            raise CollectionError('기존 메일 바로보기 파일의 크기가 변경되었습니다. 파일 무결성을 확인하세요.')
+    status=AttachmentStatus(root,path.parent.as_posix(),fingerprint)
+    return {'issues':codes,'raw_only':state.get('raw_only') is True,
+            'source_only':state.get('source_only') is True,'unavailable_attachments':len(status.skipped)}
 
 
-def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None, *, changed_sources=None):
+def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None, *, changed_sources=None, audit=False):
     root=root.resolve()
     if manifest is None:
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('viewer')!='sqlite-mail/1':
         return manifest
-    if manifest.get('portable_mail',{}).get('version')==VERSION:
+    if manifest.get('portable_mail',{}).get('version')==VERSION and not audit:
         return manifest
     from .db_client import safe_member
     count,generated=0,0
@@ -439,7 +568,7 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
         db.row_factory=sqlite3.Row
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
         target_total = total if changed_sources is None else sum(count for name,count in db.execute('SELECT source,count(*) FROM mail_records GROUP BY source') if name in changed_sources)
-        report('render', 0, target_total, unit='messages')
+        report('attachment_audit' if audit else 'render', 0, total if audit else target_total, unit='messages')
         rows=db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON m.id=i.id ORDER BY m.source,m.begin')
         with closing(rows), SourceReader() as opened:
             for row in rows:
@@ -455,7 +584,12 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
                 if not 0<=record['begin']<=record['end']<=path.stat().st_size:
                     raise CollectionError('메일 원본의 위치 또는 크기가 일치하지 않습니다.')
                 if changed_sources is not None and name not in changed_sources:
-                    result=retained_result(root,manifest,record,checkpoint)
+                    try:
+                        result=retained_result(root,manifest,record,checkpoint)
+                    except AttachmentUnavailable:
+                        stream=opened.open(path)
+                        result=render_record(root,manifest,stream,record,checkpoint)
+                        generated+=1
                 else:
                     stream=opened.open(path)
                     result=render_record(root,manifest,stream,record,checkpoint)
@@ -463,12 +597,15 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
                     report('render', generated, target_total, unit='messages')
                 issues.add(record,result)
                 count+=1
+                if audit:report('attachment_audit',count,total,unit='messages')
                 if count%100==0 or count==total:
-                    log(f'추가·변경 메일 바로보기 생성 {generated:,} / {target_total:,}건 · 기존 메일 유지' if changed_sources is not None else f'메일 바로보기 생성 {count:,} / {total:,}건')
+                    log(f'메일 첨부 상태 확인 {count:,} / {total:,}건 · 미확보 보완 {generated:,}건' if audit else
+                        f'추가·변경 메일 바로보기 생성 {generated:,} / {target_total:,}건 · 기존 메일 유지' if changed_sources is not None else f'메일 바로보기 생성 {count:,} / {total:,}건')
         if count!=total:
             raise CollectionError('메일 원본 위치 기록과 목록의 건수가 일치하지 않습니다.')
     manifest['portable_mail']={'version':VERSION,'count':count,'text_limit':TEXT_LIMIT,
-                               'warning_count':issues.count,'raw_only_count':issues.raw_only}
+                               'warning_count':issues.count,'raw_only_count':issues.raw_only,
+                               'source_only_count':issues.source_only,'unavailable_attachment_count':issues.unavailable}
     if issues.count:
         manifest['portable_mail']['issues_path']=ISSUE_REPORT
         manifest['state']='collected_with_warnings'
@@ -477,11 +614,13 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
     manifest['warnings']=[value for value in manifest.get('warnings',[]) if value!=old_warning]
     manifest['warnings']=[value for value in manifest['warnings'] if not value.startswith('메일 바로보기 확인 필요:')]
     if issues.count:
-        manifest['warnings'].append('메일 바로보기 확인 필요: %d건 (원본 EML만 보존한 메일 %d건). mail/processing-issues.html을 확인하세요.'%(issues.count,issues.raw_only))
+        manifest['warnings'].append('메일 바로보기 확인 필요: %d건 (원본 EML만 보존한 메일 %d건, 첨부 미확보 %d개). mail/processing-issues.html을 확인하세요.'%(issues.count,issues.raw_only,issues.unavailable))
     for entry in manifest.get('coverage',[]):
         if entry.get('kind')=='mail_index':
             entry['body']='static_html_and_attachments'
     atomic_write(root/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+    if not audit:
+        return build_portable_mail(root,manifest,checkpoint,log,progress,changed_sources=set(),audit=True)
     return manifest
 
 
@@ -522,8 +661,9 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=No
     if digest_file(root/'catalog.sqlite3',checkpoint)!=manifest['files'].get('catalog.sqlite3'):
         raise CollectionError('메일 검색 DB가 변경되었습니다. 파일 무결성을 확인하세요.')
     if manifest.get('portable_mail',{}).get('version')==VERSION:
+        manifest=build_portable_mail(root,manifest,checkpoint,log,progress,changed_sources=set(),audit=True)
         from .search_page import install_search_page
-        return install_search_page(root,checkpoint=checkpoint)
+        return install_search_page(root,manifest,checkpoint,progress)
     manifest=build_portable_mail(root,manifest,checkpoint,log,progress)
     from .search_page import install_search_page
     return install_search_page(root,manifest,checkpoint)

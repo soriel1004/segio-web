@@ -52,6 +52,8 @@ def processing_error(exc, phase):
         hint = '브라우저와 서버의 연결을 확인하세요. 로그인 창을 닫지 말고 다시 실행하세요.'
     elif isinstance(exc, json.JSONDecodeError):
         code, hint = 'INVALID_JSON', '서버 또는 보관 자료의 JSON 형식을 확인하지 못했습니다.'
+    elif isinstance(exc,OSError) and getattr(exc,'winerror',None) in (225,226):
+        code, hint = 'FILE_SECURITY_BLOCKED', '보안 프로그램이 원본 또는 필수 파일 접근을 차단했습니다. 보호 기록과 보존된 백업을 확인하세요. 차단된 파일을 자동 복원하지 않았습니다.'
     elif isinstance(exc, PermissionError):
         code, hint = 'FILE_ACCESS_DENIED', '저장 폴더 권한과 다른 프로그램에서 보관 파일을 열고 있는지 확인하세요.'
     elif isinstance(exc, OSError):

@@ -21,7 +21,7 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
                'LOGIN_ORIGIN_MISMATCH','LOGIN_NOT_CONFIRMED','BRIDGE_REDIRECT',
                'TIMEOUT','LOGIN_FRAME_TRANSITION','BROWSER_CONNECTION_ERROR',
-               'FILE_ACCESS_DENIED','FILE_IO_ERROR','DISK_FULL','FILE_TOO_LARGE',
+               'FILE_ACCESS_DENIED','FILE_IO_ERROR','FILE_SECURITY_BLOCKED','DISK_FULL','FILE_TOO_LARGE',
                'UNEXPECTED_PROCESSING_ERROR','INVALID_JSON','LOCAL_INDEX_PENDING',
                'LOCAL_DATABASE_ERROR','LOCAL_TEXT_ENCODING_ERROR','MEMORY_LIMIT','MAIL_FORMAT_ERROR',
                'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR',
@@ -47,6 +47,7 @@ PROCESSING_SITES = {
     'index_metadata':{'__init__','item_date'},
     'mail_folders':{'__init__','info','boxes'},
     'db_client':{'receive','finalize_download','unpack_verified'},
+    'attachment_safety':{'attachment_io','__init__','record'},
 }
 
 
