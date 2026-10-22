@@ -9,6 +9,10 @@ LABELS = {
     'index': '메일 검색 색인 생성', 'render': '메일 본문·첨부 생성',
     'finalize': '백업 폴더 마무리',
     'cleanup': '서버 임시 ZIP 삭제 확인',
+    'prepare_mail': '메일 원본 준비', 'approval_index': '결재 검색 색인 생성',
+    'index_finalize': '검색 DB 저장·검증', 'search': '보관함 검색 목록 생성',
+    'reuse': '이전 백업의 변경 없는 메일 복사·검증',
+    'cancel_cleanup': '백업 중단·이번 작업 자료 정리',
 }
 
 
@@ -30,7 +34,8 @@ class ProgressReporter:
         if key != self.last_key or now - self.last_time >= .25 or (total is not None and completed == total):
             self.callback({'stage': stage, 'completed': completed, 'total': total,
                            'unit': unit if unit in ('bytes', 'files', 'messages') else 'files',
-                           'attempt': extra.get('attempt')})
+                           'attempt': extra.get('attempt'),
+                           'messages':extra.get('messages') if type(extra.get('messages')) is int and extra['messages']>=0 else None})
             self.last_key, self.last_time = key, now
 
 
@@ -50,4 +55,6 @@ def describe_progress(event):
         label += ' (%.1f%%)' % percent
     elif done is None:
         label += ' · 처리량 확인 중'
+    if type(event.get('messages')) is int:
+        label += ' · {:,}건 색인'.format(event['messages'])
     return label, percent

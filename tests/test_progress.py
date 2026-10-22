@@ -15,6 +15,21 @@ from test_live_archive import create_fixture, worker
 
 
 class ProgressTests(unittest.TestCase):
+    def test_large_single_message_reports_scan_bytes_before_any_message_is_indexed(self):
+        from segio_archive.compact_mail import mbox_spans
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'large.mbox'
+            with path.open('wb') as stream:
+                stream.write(b'From fixture@example.test\nSubject: One large message\n\n')
+                for _ in range(10):stream.write(b'x'*1024*1024)
+            values=[]
+            spans=mbox_spans(path,progress=values.append)
+            try:
+                next(spans)
+                self.assertGreaterEqual(len(values),10)
+                self.assertEqual(values[-1],path.stat().st_size)
+                self.assertEqual(values,sorted(values))
+            finally:spans.close()
     def test_byte_percent_unknown_length_retry_and_mail_count_are_distinguished(self):
         values=[]
         report=ProgressReporter(values.append)
@@ -100,6 +115,30 @@ class ProgressTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('DISPLAY') or sys.platform=='win32', 'A GUI display is required')
 class ProgressWindowTests(unittest.TestCase):
+    def test_stop_requires_confirmation_and_marks_only_this_backup_for_discard(self):
+        from segio_archive.gui import App
+        from segio_archive.web import Config
+        app=App()
+        try:
+            app.running=True
+            app.active_config=Config('https://example.invalid','employee',Path('/unused'),cancel=app.cancel_event)
+            with patch('segio_archive.gui.messagebox.askokcancel',return_value=False):app.stop()
+            self.assertFalse(app.cancel_event.is_set())
+            self.assertFalse(app.active_config.discard_cancelled)
+            with patch('segio_archive.gui.messagebox.askokcancel',return_value=True) as dialog:app.stop()
+            self.assertIn('지금까지 진행한 내역이 삭제됩니다',dialog.call_args.args[1])
+            self.assertTrue(app.cancel_event.is_set())
+            self.assertTrue(app.active_config.discard_cancelled)
+            self.assertEqual(str(app.stop_button.cget('state')),'disabled')
+            with patch('segio_archive.gui.messagebox.showinfo') as dialog:
+                app.events.put(('cancelled',('백업을 중단했습니다. 삭제했습니다.',True)))
+                app.poll()
+            dialog.assert_called_once()
+            self.assertFalse(app.running)
+            self.assertNotEqual(float(app.progress.cget('value')),100)
+        finally:
+            app.running=False
+            app.close()
     def test_worker_queue_updates_real_progressbar_and_completion_error_states(self):
         from segio_archive.gui import App
         app=App()
@@ -130,9 +169,11 @@ class ProgressWindowTests(unittest.TestCase):
                 (root/'manifest.json').write_text(json.dumps({'state':'collected','warnings':[]}))
                 app.running=True
                 app.begin_progress('다음 백업')
-                with patch('segio_archive.gui.messagebox.showinfo'):
+                with patch('segio_archive.gui.messagebox.showinfo') as completed:
                     app.events.put(('done',root))
                     app.poll()
+                self.assertEqual(completed.call_args.args[0],'백업 완료')
+                self.assertIn('백업이 완료되었습니다',completed.call_args.args[1])
                 self.assertEqual(float(app.progress.cget('value')),100)
                 self.assertIn('백업 완료',app.progress_text.get())
                 (root/'manifest.json').write_text(json.dumps({'state':'collected','warnings':[],

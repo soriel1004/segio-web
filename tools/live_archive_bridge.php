@@ -227,9 +227,11 @@ if ($action==='diagnostic') {
 }
 if ($action==='info') answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,
     'csrf'=>$csrf,'cleanup_revision'=>'verified-cleanup-1',
+    'incremental_revision'=>'mail-hash-delta-1','cancel_cleanup_revision'=>'cancel-discard-1',
     'capabilities'=>array('live_db'=>true,'mbox'=>!empty($config['mail_template']))));
 if ($post) {
-    foreach($_POST as $key=>$value) if (!in_array($key,array('csrf','approvals','mail'),true)) problem(400,'unexpected_parameter');
+    $allowed_post=$action==='start'?array('csrf','approvals','mail','mail_baseline'):array('csrf','discard');
+    foreach($_POST as $key=>$value) if (!in_array($key,$allowed_post,true)) problem(400,'unexpected_parameter');
     $token=isset($_POST['csrf'])?$_POST['csrf']:'';
     if (!same_token($token,$csrf) && !same_token($token,hash_hmac('sha256',$uid.'|'.($hour-1),$config['csrf_secret'])))
         problem(403,'csrf_required');
@@ -239,6 +241,8 @@ if ($action==='start') {
     $approvals=isset($_POST['approvals']) && $_POST['approvals']==='1';
     $mail=isset($_POST['mail']) && $_POST['mail']==='1';
     if (!$approvals && !$mail) problem(400,'empty_selection');
+    $baseline=isset($_POST['mail_baseline'])?$_POST['mail_baseline']:null;
+    if ($baseline!==null && (!is_string($baseline) || strlen($baseline)>48000 || !$mail)) problem(400,'invalid_baseline');
     if ($mail && empty($config['mail_template'])) problem(503,'mail_path_unconfigured');
     if (!function_exists('proc_open')) problem(503,'export_process_unavailable');
     $gate=fopen($jobs.'/.gate','a+');
@@ -265,7 +269,9 @@ if ($action==='start') {
     if ($active>=4) problem(409,'export_busy');
     $id=new_job_id($config,$root); $job=$jobs.'/'.$id;
     if (!mkdir($job,0700)) problem(503,'job_storage_failed');
-    save_object($job.'/request.json',array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time()));
+    $request_value=array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time());
+    if ($baseline!==null) $request_value['mail_baseline']=$baseline;
+    save_object($job.'/request.json',$request_value);
     save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued','phase'=>'queued'));
     flock($gate,LOCK_UN); fclose($gate);
     $started=run_fixed_worker($config,$root,array('--config',$root.'/config.json','--job',$id,'--detach'),false,$id);
@@ -307,6 +313,8 @@ if ($action==='cleanup') {
         answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,
             'state'=>'cleaned','archive_deleted'=>true,'job_deleted'=>true));
     }
+    if (isset($_POST['discard']) && $_POST['discard']==='1' &&
+            @file_put_contents($job.'/discard-on-cancel','discard')===false) problem(503,'cleanup_failed');
     if (@file_put_contents($job.'/cancel','cancel')===false) problem(503,'cleanup_failed');
     answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,
         'state'=>'cancellation_requested','archive_deleted'=>false,'job_deleted'=>false));

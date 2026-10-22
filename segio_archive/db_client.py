@@ -224,6 +224,8 @@ class PreparedDBCollector(Collector):
         self.failure_path = None
         self.progress = ProgressReporter(config.progress)
         self.user_agent = None
+        self.owned_folders = []
+        self.local_discard_confirmed = False
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
             raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
 
@@ -274,6 +276,9 @@ class PreparedDBCollector(Collector):
     def finish_remote_cleanup(self, destination):
         pass
 
+    def reset_remote_job(self):
+        pass
+
     def record_failure(self, exception):
         try:
             self.failure_path = write_failure(self.config.output,exception,self.phase)
@@ -289,6 +294,7 @@ class PreparedDBCollector(Collector):
             raise CollectionError("ZIP을 저장할 공간이 부족합니다.")
         with tempfile.TemporaryDirectory(prefix='.segio-download-', dir=output, ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
+            self.owned_folders.append(root)
             archive = root/'download.zip'
             destination = root/'contents'
             destination.mkdir(mode=0o700)
@@ -334,6 +340,7 @@ class PreparedDBCollector(Collector):
                 # Verify directly into a reserved persistent folder. Once
                 # verified, temporary cleanup must never delete these files.
                 destination = reserve_personal_folder(output, self.config.username)
+                self.owned_folders.append(destination)
                 try:
                     unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
                     self.validate_download(destination)
@@ -353,6 +360,8 @@ class PreparedDBCollector(Collector):
                     self.after_verified_download(destination)
                 self.checkpoint()
                 self.finalize_download(root, archive, destination)
+            except Cancelled:
+                raise
             except Exception as exc:
                 if self.keep_zip:
                     raise
@@ -360,6 +369,7 @@ class PreparedDBCollector(Collector):
                 error = CollectionError(str(reason)+'\n검증된 원본은 보존했습니다. ‘기존 백업 갱신’에서 다음 폴더를 선택하세요: '+str(destination)+' [LOCAL_INDEX_PENDING]')
                 error.filesystem_diagnostic = getattr(reason,'filesystem_diagnostic',None)
                 raise error from None
+            self.checkpoint()
             self.progress('finalize')
             if not self.keep_zip:
                 return destination
@@ -367,6 +377,9 @@ class PreparedDBCollector(Collector):
 
     def run(self, password: str) -> Path:
         from playwright.sync_api import sync_playwright
+        self.owned_folders=[]
+        self.local_discard_confirmed=False
+        self.reset_remote_job()
         try:
             self.checkpoint()
             with sync_playwright() as p:
@@ -403,19 +416,35 @@ class PreparedDBCollector(Collector):
                         prepared = '확인 필요'
                     self.log("본인 자료 확인 · 추출 기준 시각: " + prepared)
                     result = self.receive(record)
+                    self.checkpoint()
                     self.finish_remote_cleanup(result)
+                    self.checkpoint()
                     self.log("다운로드와 파일 검증 완료: " + str(result))
                     return result
                 finally:
                     try:
                         self.cleanup_remote()
                     except Exception:
-                        self.log('서버 임시 ZIP 삭제를 확인하지 못했습니다. 저장된 백업은 유지됩니다. 서버 정리 상태를 확인하세요.')
+                        self.log('서버 중단·삭제를 확인하지 못했습니다. 서버 작업 상태를 확인하세요.' if self.config.discard_cancelled else
+                                 '서버 임시 ZIP 삭제를 확인하지 못했습니다. 저장된 백업은 유지됩니다. 서버 정리 상태를 확인하세요.')
+                    self.discard_local_on_cancel()
                     try:
                         self.browser.close()
                     except Exception:
                         pass
                     self.context = self.page = self.browser = None
+                    if self.config.discard_cancelled and self.config.cancel.is_set():
+                        self.checkpoint()
+        except Cancelled:
+            if self.config.discard_cancelled:
+                self.discard_local_on_cancel()
+                local='이번 백업의 PC 파일·폴더를 삭제했습니다.' if self.local_discard_confirmed else '이번 백업의 PC 파일·폴더 삭제를 확인하지 못했습니다. 프로그램 로그를 확인하세요.'
+                remote=('이번 서버 작업의 임시 파일·폴더를 삭제했습니다.' if getattr(self,'cleanup_confirmed',False) or (not getattr(self,'job',None) and not getattr(self,'start_requested',False)) else
+                        '서버 중단·자동 정리를 요청했으며 삭제 완료는 아직 확인하지 못했습니다.' if getattr(self,'cancel_auto_cleanup_requested',False) else
+                        '서버 중단을 요청했지만 삭제 완료는 확인하지 못했습니다. 서버 tools를 갱신하고 작업 상태를 확인하세요.' if getattr(self,'cleanup_cancel_requested',False) else
+                        '서버 연결 문제로 중단·삭제를 확인하지 못했습니다. 관리자가 서버 작업 상태를 확인해야 합니다.')
+                raise Cancelled('백업을 중단했습니다.\n'+local+'\n'+remote) from None
+            raise
         except (CollectionError, BrowserUnavailable) as exc:
             self.record_failure(exc)
             raise
@@ -427,6 +456,22 @@ class PreparedDBCollector(Collector):
         finally:
             password = ''
 
+    def discard_local_on_cancel(self):
+        if not (self.config.discard_cancelled and self.config.cancel.is_set()):
+            return
+        self.local_discard_confirmed = True
+        self.progress('cancel_cleanup')
+        output=self.config.output.expanduser().resolve()
+        for path in self.owned_folders:
+            try:
+                if path.parent.resolve()!=output or path.is_symlink():
+                    raise OSError('Unsafe owned folder')
+                if path.exists():
+                    shutil.rmtree(path)
+            except OSError:
+                self.local_discard_confirmed = False
+                self.log('이번 백업의 PC 임시 폴더 삭제를 확인하지 못했습니다: '+str(path))
+
 
 class DBCollector(PreparedDBCollector):
     """Fresh employee-scoped DB query and original server mailbox transfer."""
@@ -434,12 +479,18 @@ class DBCollector(PreparedDBCollector):
 
     def __init__(self, config, log=lambda _: None):
         super().__init__(config, log)
+        self.reset_remote_job()
+
+    def reset_remote_job(self):
         self.csrf = None
         self.job = None
         self.cleanup_confirmed = False
         self.cleanup_cancel_requested = False
+        self.cancel_auto_cleanup_requested = False
         self.cleanup_attempts = 0
         self.cleanup_error_code = None
+        self.baseline = None
+        self.start_requested = False
 
     def live_call(self, action, *, post=False, pending_login=False, timeout_ms=None, **fields):
         if action != 'cleanup':
@@ -520,6 +571,7 @@ class DBCollector(PreparedDBCollector):
             'read_only':'서버가 추출 요청의 HTTP 메서드를 허용하지 않았습니다. PHP의 요청 전달 설정을 확인하세요. [read_only]',
             'unexpected_parameter':'서버가 지원하지 않는 추출 요청 항목을 받았습니다. Windows와 서버 도구의 버전을 맞추세요. [unexpected_parameter]',
             'empty_selection':'서버에 결재 문서·메일 중 선택한 수집 항목이 전달되지 않았습니다. [empty_selection]',
+            'invalid_baseline':'변경분 비교 목록을 서버가 확인하지 못했습니다. 이전 백업과 서버 tools 버전을 확인하거나 전체 백업을 선택하세요. [invalid_baseline]',
             'job_status_unavailable':'서버 추출 작업의 상태 파일을 읽지 못했습니다. [job_status_unavailable]',
             'job_not_found':'요청한 서버 추출 작업이 없거나 로그인 계정과 일치하지 않습니다. [job_not_found]',
             'invalid_job':'서버 추출 작업 번호가 올바르지 않습니다. [invalid_job]',
@@ -659,8 +711,19 @@ class DBCollector(PreparedDBCollector):
         if info.get('capabilities',{}).get('live_db') is not True:
             raise CollectionError('이 서버는 실시간 DB 추출을 지원하지 않습니다.')
         self.csrf = info['csrf']
+        fields={}
+        if self.config.incremental_base and self.config.mail:
+            if info.get('incremental_revision')!='mail-hash-delta-1':
+                raise CollectionError('변경분 백업을 사용하려면 서버 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
+            from .incremental import Baseline
+            self.log('이전 백업의 완료 상태와 메일 원본 검증 목록을 확인하는 중')
+            self.baseline=Baseline(self.config.incremental_base,self.config.username,self.checkpoint)
+            fields['mail_baseline']=self.baseline.payload()
+        if self.config.incremental_base:
+            self.log('결재는 현재 상태를 다시 조회하고, 메일은 변경 없는 원본 파일의 서버 압축·전송을 생략합니다.')
+        self.start_requested = True
         started = self.live_call('start', post=True, approvals='1' if self.config.approvals else '0',
-                                 mail='1' if self.config.mail else '0')
+                                 mail='1' if self.config.mail else '0',**fields)
         job = started.get('job','')
         if not re.fullmatch(r'[a-f0-9]{32}',str(job)):
             raise CollectionError('서버 작업 번호가 올바르지 않습니다.')
@@ -711,6 +774,11 @@ class DBCollector(PreparedDBCollector):
         if (live.get('job')!=self.job or live.get('approvals')!=self.config.approvals or
             live.get('mail')!=self.config.mail):
             raise CollectionError('이번 요청의 DB·MBOX 선택과 추출 결과가 일치하지 않습니다.')
+        if self.baseline:
+            count,size=self.baseline.restore(destination,self.checkpoint,self.progress)
+            self.log('이전 백업에서 변경 없는 메일 원본 %d개 (%.1f MiB)를 검증해 새 백업에 복사했습니다.'%(count,size/1024**2))
+        elif manifest.get('incremental'):
+            raise CollectionError('전체 백업 요청에 변경분 보관본이 반환되어 중단했습니다.')
 
     def finalize_download(self, root, archive, destination):
         from .mail_import import build_local_catalog
@@ -736,9 +804,17 @@ class DBCollector(PreparedDBCollector):
                     if not re.fullmatch(r'[a-f0-9]{64}',str(token)):
                         raise CollectionError('서버 정리용 인증 정보를 확인하지 못했습니다.')
                     self.csrf = token
-                    result = self.live_call('cleanup',post=True,timeout_ms=10000)
+                    discarding=self.config.discard_cancelled and self.config.cancel.is_set()
+                    discard_fields=({'discard':'1'} if discarding and info.get('cancel_cleanup_revision')=='cancel-discard-1' else {})
+                    if discarding:
+                        self.progress('cancel_cleanup')
+                    result = self.live_call('cleanup',post=True,timeout_ms=10000,
+                                            **discard_fields)
                     if result.get('job')==self.job and result.get('state')=='cancellation_requested':
                         self.cleanup_cancel_requested = True
+                        self.cancel_auto_cleanup_requested = bool(discard_fields)
+                        if discarding:
+                            self.wait_cancel_cleanup(discard_fields)
                         return
                     if (result.get('job')!=self.job or result.get('state')!='cleaned' or
                             result.get('archive_deleted') is not True or result.get('job_deleted') is not True):
@@ -759,6 +835,34 @@ class DBCollector(PreparedDBCollector):
                     time.sleep(.25*(attempt+1))
         finally:
             self.phase = phase
+
+    def wait_cancel_cleanup(self, discard_fields):
+        """Worker owns deletion after its handles close, even if we disconnect."""
+        self.log('서버 작업 중단과 이번 작업의 파일·폴더 삭제를 확인하는 중')
+        deadline=time.monotonic()+20
+        while time.monotonic()<deadline:
+            time.sleep(.5)
+            try:
+                status=self.live_call('status',timeout_ms=2000)
+                if status.get('state') not in ('failed','ready'):
+                    continue
+            except Exception:
+                # A deleted job's status can be JSON or a rewritten HTTP 404.
+                pass
+            if self.cleanup_attempts>=3:
+                break
+            self.cleanup_attempts+=1
+            try:
+                result=self.live_call('cleanup',post=True,timeout_ms=3000,**discard_fields)
+                if (result.get('job')==self.job and result.get('state')=='cleaned' and
+                        result.get('archive_deleted') is True and result.get('job_deleted') is True):
+                    self.cleanup_confirmed=True
+                    self.cleanup_error_code=None
+                    self.log('중단한 서버 작업의 임시 파일·폴더 삭제를 확인했습니다.')
+                    return
+            except Exception:
+                pass
+        self.log('서버 자동 정리는 요청했습니다. 삭제 완료 응답을 아직 확인하지 못했습니다.')
 
     def save_cleanup_status(self, destination):
         from .archive import atomic_write

@@ -4,6 +4,25 @@
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
+## v0.6.0 변경분 백업·중단 후 자동 정리
+
+Windows v0.6.0의 추가·변경분 백업에는 `mail-hash-delta-1`, 중단 확인 후 작업기의 자동 삭제에는 `cancel-discard-1`이 필요합니다. 두 프로그램에서 사용 중인 백업이 끝난 뒤 root SSH에서 설치하세요. 그룹웨어 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.6.0.zip \
+  -o "$TOOLS_DIR/segio-web-0.6.0.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.6.0.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.6.0/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+직원 로그인과 CSRF를 확인한 시작 요청만 제한된 메일 검증 목록을 받습니다. 서버는 로그인 직원의 기존 메일 경로에서 열거한 파일만 비교하며 클라이언트 경로·명령·대상 직원 ID를 받지 않습니다. 파일 전체를 안정적으로 읽고 SHA-256이 일치할 때만 전송에서 생략합니다. 변경·삭제·이름 변경은 원본 재대조 규칙을 그대로 적용하며, 변경 MBOX는 전체 전송합니다. 결재는 현재 DB를 다시 조회합니다. Windows는 자신의 이전 백업에서 생략 파일을 검증해 새 폴더에 복사하며 이전 백업을 덮어쓰지 않습니다.
+
+중단 확인 뒤 cleanup의 `discard=1`은 소유자가 일치하는 해당 실행 중 작업에만 자동 정리 표식을 남깁니다. 작업기는 취소를 처리하고 열린 파일을 닫은 뒤 임시 ZIP·work·작업 폴더를 지우고 소유자 확인용 작은 receipt만 남깁니다. DB 통신 중에는 해당 작업의 psql 자식만 종료·회수합니다. 클라이언트가 연결을 잃어도 서버가 표식을 받은 경우 정리 요청이 유지됩니다. 삭제 응답 미확인은 완료로 표시하지 않습니다. 일반 오류로 보존한 PC 원본과 과거 완료 백업은 이 중단 삭제 대상이 아닙니다. SSH 프로그램의 파일 목록과 기존 wire protocol은 유지합니다.
+
 ## 백업 후 서버 임시 ZIP 삭제
 
 `verified-cleanup-1`은 개인 로그인 백업의 삭제 요청에서 실제 ZIP과 작업 폴더 삭제를 확인합니다. 실패하면 `cleanup_failed`를 반환하고 성공으로 응답하지 않습니다. 삭제 확인 응답이 사라져도 같은 직원이 같은 작업을 재요청할 수 있도록 비공개 확인 JSON을 남깁니다. 요청별 직원 인증·시간 제한 CSRF 검증은 유지합니다. 실행 중인 추출은 취소를 요청하며 삭제 완료로 응답하지 않습니다. 다른 직원의 작업과 서버 원본 결재·메일은 정리 요청으로 삭제하지 않습니다.

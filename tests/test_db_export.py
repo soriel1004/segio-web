@@ -16,6 +16,21 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_cancelled_database_communication_terminates_only_its_own_child(self):
+        import time
+        process=subprocess.Popen([sys.executable,'-c','import sys,time; sys.stdin.buffer.read(); time.sleep(60)'],
+                                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        started=time.monotonic()
+        def checkpoint():
+            if time.monotonic()-started>.2:raise exporter.SafeError('cancelled')
+        try:
+            with self.assertRaisesRegex(exporter.SafeError,'cancelled'):
+                exporter.communicate_cancellable(process,b'SELECT 1;',checkpoint)
+            self.assertIsNotNone(process.poll())
+            self.assertLess(time.monotonic()-started,5)
+        finally:
+            if process.poll() is None:process.kill()
+            process.wait()
     @unittest.skipIf(os.name == 'nt', 'Legacy POSIX filename encodings')
     def test_korean_native_paths_under_ascii_locale_and_ambiguous_names(self):
         with tempfile.TemporaryDirectory() as tmp:

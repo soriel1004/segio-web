@@ -796,6 +796,89 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
             self.assertEqual(len(popups),1)
             self.assertTrue(popups[0].is_closed())
 
+    def test_incremental_employee_login_transfers_changed_mail_and_reuses_verified_local_files(self):
+        mail=self.live_root/'home/e/employee/mbox/new-incremental.eml'
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                base=DBCollector(config).run(PASSWORD)
+                saved={str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()}
+                mail.write_bytes(b'Subject: Native incremental old-dated arrival\nDate: Mon, 01 Jan 1990 10:00:00 +0900\n\nnew arrival')
+                config.incremental_base=base
+                client=DBCollector(config)
+                result=client.run(PASSWORD)
+                manifest=json.loads((result/'manifest.json').read_bytes())
+                self.assertGreater(manifest['incremental']['reused_bytes'],0)
+                self.assertTrue(verify_archive(result)['ok'])
+                from segio_archive.compact_mail import search
+                self.assertEqual(search(result,'Native incremental',kind='mail')['total'],1)
+                self.assertTrue(client.cleanup_confirmed)
+                self.assertEqual(saved,{str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()})
+        finally:mail.unlink(missing_ok=True)
+
+    def test_confirmed_cancel_waits_for_running_server_job_deletion(self):
+        from segio_archive.web import Cancelled
+        launcher=self.live_root/'worker.py'
+        original=launcher.read_text()
+        client=None
+        try:
+            launcher.write_text(original.replace('worker.run_export=synthetic_export',
+                "def delayed(*args,**kwargs):\n    for _ in range(100):\n        __import__('time').sleep(.05)\n        kwargs['checkpoint']()\n    return synthetic_export(*args,**kwargs)\nworker.run_export=delayed"))
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                previous=root/'previous-backup'
+                previous.mkdir()
+                (previous/'original').write_bytes(b'PREVIOUS_BACKUP')
+                config=Config(self.url+'/', 'employee', root,mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                client=DBCollector(config)
+                call=client.live_call
+                states=[]
+                def cancel(action,**fields):
+                    value=call(action,**fields)
+                    if action=='status' and not config.cancel.is_set():
+                        config.discard_cancelled=True
+                        config.cancel.set()
+                    if action=='cleanup':states.append(value.get('state'))
+                    return value
+                with patch.object(client,'live_call',side_effect=cancel):
+                    with self.assertRaisesRegex(Cancelled,'서버 작업의 임시 파일·폴더를 삭제'):
+                        client.run(PASSWORD)
+                self.assertIn('cancellation_requested',states)
+                self.assertTrue(client.cleanup_confirmed)
+                self.assertTrue(client.local_discard_confirmed)
+                self.assertFalse((self.live_root/'jobs'/client.job).exists())
+                self.assertEqual((previous/'original').read_bytes(),b'PREVIOUS_BACKUP')
+                self.assertEqual({p.name for p in root.iterdir()},{'previous-backup'})
+        finally:
+            launcher.write_text(original)
+            if client and client.job:shutil.rmtree(self.live_root/'jobs'/client.job,ignore_errors=True)
+
+    def test_confirmed_cancel_during_local_index_deletes_only_this_new_backup(self):
+        from segio_archive.web import Cancelled
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            previous=root/'previous-backup'
+            previous.mkdir()
+            (previous/'original').write_bytes(b'PREVIOUS_BACKUP')
+            config=Config(self.url+'/', 'employee', root,mail=True,pdf=False,
+                          allow_http=True,headless=True,timeout_ms=10000,
+                          browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            def cancel(event):
+                if event['stage']=='approval_index':
+                    config.discard_cancelled=True
+                    config.cancel.set()
+            config.progress=cancel
+            client=DBCollector(config)
+            with self.assertRaises(Cancelled):client.run(PASSWORD)
+            self.assertTrue(client.cleanup_confirmed)
+            self.assertTrue(client.local_discard_confirmed)
+            self.assertEqual({p.name for p in root.iterdir()},{'previous-backup'})
+            self.assertEqual((previous/'original').read_bytes(),b'PREVIOUS_BACKUP')
+
     def test_live_login_db_mail_download_and_subject_search(self):
         with tempfile.TemporaryDirectory() as tmp:
             config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,

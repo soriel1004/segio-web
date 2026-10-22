@@ -85,6 +85,8 @@ class Config:
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     progress: object = field(default=None, repr=False, compare=False)
     minimize_browser: bool = False
+    incremental_base: Path | None = None
+    discard_cancelled: bool = False
 
     def validate(self):
         self.server = html.unescape(self.server.strip().replace("\\&", "&"))

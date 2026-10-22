@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .archive import verify_archive, STATES
 from .browser import BrowserUnavailable
-from .web import CollectionError, Config, DEFAULT_SERVER
+from .web import Cancelled, CollectionError, Config, DEFAULT_SERVER
 from . import __version__
 from .progress import ProgressReporter, describe_progress
 
@@ -23,12 +23,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE + " · v" + __version__)
-        self.geometry("890x820")
+        self.geometry("890x910")
         self.minsize(800, 700)
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
         self.local_conversion = False
+        self.active_config = None
         self.last_archive = None
         self.viewer = None
         self.server = tk.StringVar(value=DEFAULT_SERVER)
@@ -41,6 +42,8 @@ class App(tk.Tk):
         self.method = tk.StringVar(value=DB_MODE)
         self.http = tk.BooleanVar(value=True)
         self.manual = tk.BooleanVar(value=False)
+        self.backup_mode = tk.StringVar(value='full')
+        self.baseline_folder = tk.StringVar()
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
         self.progress_text = tk.StringVar(value='백업을 시작하면 단계별 처리량을 표시합니다.')
         self.progress_detail = ''
@@ -75,6 +78,17 @@ class App(tk.Tk):
         ttk.Label(folder_row,text='Windows 저장 폴더',width=20).pack(side='left')
         ttk.Entry(folder_row,textvariable=self.folder).pack(side='left',fill='x',expand=True)
         ttk.Button(folder_row,text='선택',command=self.choose_folder).pack(side='left',padx=(8,0))
+        mode_row=ttk.Frame(panel)
+        mode_row.pack(fill='x',pady=5)
+        ttk.Label(mode_row,text='백업 범위',width=20).pack(side='left')
+        ttk.Radiobutton(mode_row,text='처음부터 전체 백업',variable=self.backup_mode,value='full',command=self.backup_mode_changed).pack(side='left')
+        ttk.Radiobutton(mode_row,text='이전 백업 이후 추가·변경분',variable=self.backup_mode,value='incremental',command=self.backup_mode_changed).pack(side='left',padx=12)
+        baseline_row=ttk.Frame(panel)
+        baseline_row.pack(fill='x',pady=(0,5))
+        ttk.Label(baseline_row,text='비교할 이전 백업',width=20).pack(side='left')
+        ttk.Entry(baseline_row,textvariable=self.baseline_folder,state='readonly').pack(side='left',fill='x',expand=True)
+        self.baseline_button=ttk.Button(baseline_row,text='선택',command=self.choose_baseline,state='disabled')
+        self.baseline_button.pack(side='left',padx=(8,0))
         choices = ttk.Frame(panel)
         choices.pack(fill="x")
         self.collection_choices = []
@@ -111,6 +125,16 @@ class App(tk.Tk):
         if value:
             self.folder.set(value)
 
+    def backup_mode_changed(self):
+        self.baseline_button.config(state='normal' if self.backup_mode.get()=='incremental' else 'disabled')
+
+    def choose_baseline(self):
+        if self.running:
+            return
+        value=filedialog.askdirectory(title='정상 완료한 이전 백업의 manifest.json이 있는 폴더',initialdir=self.folder.get())
+        if value:
+            self.baseline_folder.set(value)
+
     def start(self):
         if self.running:
             return
@@ -125,6 +149,10 @@ class App(tk.Tk):
                             manual_login=self.manual.get(), cancel=self.cancel_event)
             config.progress = lambda event:self.events.put(('progress',event))
             config.minimize_browser = True
+            if self.backup_mode.get()=='incremental':
+                if not self.baseline_folder.get():
+                    raise ValueError('비교할 이전 백업 폴더를 선택하세요.')
+                config.incremental_base=Path(self.baseline_folder.get())
             password = self.password.get()
             if not password and not config.manual_login:
                 raise ValueError("그룹웨어 암호를 입력하거나 브라우저 직접 로그인을 선택하세요.")
@@ -132,6 +160,7 @@ class App(tk.Tk):
         except Exception as exc:
             return messagebox.showerror("입력 확인", str(exc))
         self.password.set("")
+        self.active_config=config
         self.running = True
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
@@ -145,7 +174,14 @@ class App(tk.Tk):
             from .db_client import DBCollector
             collector = DBCollector(config, lambda s:self.events.put(('log',s)))
             path = collector.run(password)
+            if config.discard_cancelled and config.cancel.is_set():
+                collector.discard_local_on_cancel()
+                raise Cancelled('백업을 중단했습니다. 이번 작업의 파일·폴더 정리 결과를 프로그램 로그에서 확인하세요.')
             self.events.put(("done", path))
+        except Cancelled as exc:
+            confirmed=bool(collector and collector.local_discard_confirmed and
+                           (collector.cleanup_confirmed or (not collector.job and not collector.start_requested)))
+            self.events.put(('cancelled',(str(exc),confirmed)))
         except (CollectionError, BrowserUnavailable) as exc:
             message = str(exc)
             if getattr(collector,'failure_path',None):
@@ -167,12 +203,19 @@ class App(tk.Tk):
                     self.log_text.insert("end", value + "\n")
                     self.log_text.see("end")
                     self.log_text.config(state="disabled")
-                elif event in {"done", "error", "archive_ready", "archive_error"}:
+                elif event in {"done", "error", "cancelled", "archive_ready", "archive_error"}:
                     self.running = False
+                    self.active_config = None
                     self.progress.stop()
                     self.start_button.config(state="normal")
                     self.stop_button.config(state="disabled")
-                    if event == 'archive_ready':
+                    if event == 'cancelled':
+                        message,confirmed=value
+                        self.finish_progress('백업 중단 · 자료 삭제 완료' if confirmed else '백업 중단 · 삭제 확인 필요',False)
+                        self.status.set(message)
+                        dialog=messagebox.showinfo if confirmed else messagebox.showwarning
+                        dialog('백업 중단',message)
+                    elif event == 'archive_ready':
                         self.finish_progress('기존 백업 갱신 완료', True)
                         self.last_archive=value
                         self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
@@ -194,7 +237,7 @@ class App(tk.Tk):
                             self.status.set('PC 백업 완료 · 서버 임시 ZIP 삭제 미확인 · '+str(value))
                             messagebox.showwarning('서버 정리 확인','PC 백업은 저장됐지만 서버 임시 ZIP 삭제를 확인하지 못했습니다. 서버 정리 상태와 프로그램 로그를 확인하세요.\n저장 폴더: '+str(value))
                         else:
-                            messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
+                            messagebox.showinfo("백업 완료", "백업이 완료되었습니다.\n저장 폴더: "+str(value))
                     else:
                         self.finish_progress(self.progress_detail + ' · 중단 또는 오류', False)
                         self.status.set(value)
@@ -244,11 +287,23 @@ class App(tk.Tk):
             self.progress.config(value=percent)
 
     def stop(self):
-        self.cancel_event.set()
-        if self.local_conversion:
-            self.status.set('메일 변환을 중단합니다. 완료한 메일은 다음 갱신에서 재사용합니다.')
+        if not self.running:
             return
-        self.status.set("현재 요청이 끝나면 중단합니다. 검증 전 임시 다운로드 파일은 제거합니다.")
+        if self.local_conversion:
+            if messagebox.askokcancel('변환 중단','메일 변환을 중단하시겠습니까? 기존에 완료한 백업 원본은 보존합니다.') and self.running:
+                self.cancel_event.set()
+                self.stop_button.config(state='disabled')
+                self.status.set('메일 변환을 중단합니다. 기존 백업 원본은 유지합니다.')
+            return
+        confirmed=messagebox.askokcancel('백업 중단 확인',
+            '지금까지 진행한 내역이 삭제됩니다.\n이번 백업의 PC 파일과 서버 임시 작업 파일·폴더를 삭제하고 중단하시겠습니까?\n이전에 완료한 백업과 그룹웨어 원본은 유지합니다.')
+        if not confirmed or not self.running:
+            return
+        if self.active_config:
+            self.active_config.discard_cancelled=True
+        self.cancel_event.set()
+        self.stop_button.config(state='disabled')
+        self.status.set('백업을 중단하고 이번 작업의 파일·폴더를 정리하는 중입니다. 삭제 확인까지 기다려 주세요.')
 
     def select_archive(self):
         value = filedialog.askdirectory(title="index.html과 manifest.json이 있는 보관 폴더",

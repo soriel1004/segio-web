@@ -9,6 +9,33 @@ from segio_archive.web import CollectionError, Config
 
 
 class ServerCleanupClientTests(unittest.TestCase):
+    def test_reusing_collector_then_cancelling_never_deletes_a_previous_completed_backup(self):
+        from segio_archive.web import Cancelled
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            previous=root/'segio-employee'
+            previous.mkdir()
+            (previous/'original').write_bytes(b'PREVIOUS_COMPLETED_BACKUP')
+            client=self.client(root)
+            client.owned_folders=[previous]
+            client.cleanup_confirmed=True
+            client.config.discard_cancelled=True
+            client.config.cancel.set()
+            with self.assertRaises(Cancelled):client.run('')
+            self.assertEqual((previous/'original').read_bytes(),b'PREVIOUS_COMPLETED_BACKUP')
+            self.assertIsNone(client.job)
+    def test_confirmed_cancel_still_cancels_and_cleans_a_legacy_bridge_without_discard_parameter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client=self.client(Path(tmp))
+            client.config.discard_cancelled=True
+            client.config.cancel.set()
+            results=[{'csrf':'b'*64},{'job':client.job,'state':'cancellation_requested'},
+                     {'job':client.job,'state':'failed'},
+                     {'job':client.job,'state':'cleaned','archive_deleted':True,'job_deleted':True}]
+            with patch.object(client,'live_call',side_effect=results) as calls,patch('segio_archive.db_client.time.sleep'):
+                client.cleanup_remote()
+            self.assertTrue(client.cleanup_confirmed)
+            self.assertTrue(all('discard' not in call.kwargs for call in calls.call_args_list))
     def client(self, root):
         client=DBCollector(Config('https://example.invalid/','employee',root))
         client.job='a'*32

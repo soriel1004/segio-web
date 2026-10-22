@@ -24,6 +24,8 @@ from export_schema_from_segio_config import SafeError
 PROTOCOL = 'segio-live-archive/1'
 CONTROL_PROTOCOL = 'segio-worker-control/1'
 MAIL_COPY_REVISION = 'mail-retry-progress-1'
+INCREMENTAL_REVISION = 'mail-hash-delta-1'
+CANCEL_CLEANUP_REVISION = 'cancel-discard-1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
@@ -34,7 +36,7 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
     'server_access_denied', 'server_file_missing', 'export_failed',
     'secure_random_unavailable', 'csrf_required', 'read_only', 'unexpected_parameter',
-    'empty_selection', 'job_storage_failed', 'export_process_unavailable',
+    'empty_selection', 'invalid_baseline', 'job_storage_failed', 'export_process_unavailable',
     'export_already_running', 'export_busy', 'mail_path_unconfigured'))
 
 
@@ -194,7 +196,36 @@ def copy_mail_file(path, destination, expected, checkpoint, progress):
         source.close()
 
 
-def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fields: None):
+def parse_mail_baseline(raw):
+    if raw is None:
+        return None
+    try:
+        if len(raw.encode('utf-8')) > 48000:
+            raise ValueError()
+        value=json.loads(raw)
+        entries=value['files']
+        if value.get('protocol')!='segio-incremental/1' or not isinstance(entries,list) or len(entries)>1000:
+            raise ValueError()
+        result={}
+        for item in entries:
+            name=item['name_bytes_hex']
+            size=item['bytes']
+            if (not re.match(r'\A(?:[a-f0-9]{2}){1,4096}\Z',name) or name in result or
+                    isinstance(size,bool) or size<0 or int(size)!=size or
+                    not re.match(r'\A[a-f0-9]{64}\Z',item['sha256'])):
+                raise ValueError()
+            result[name]={'bytes':size,'sha256':item['sha256']}
+        return result
+    except (ValueError,KeyError,TypeError,AttributeError,OverflowError):
+        raise SafeError('invalid_baseline')
+
+
+def mail_name_hex(name):
+    raw = name if isinstance(name,bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape' if sys.version_info[0]>=3 else 'strict')
+    return binascii.hexlify(raw).decode('ascii')
+
+
+def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fields: None, baseline=None):
     root = mail_path(template, user)
     cached, slots = {}, {}
     failure = SafeError('mail_changed_retry')
@@ -228,7 +259,10 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
                 cached.pop(name, None)
                 try:
                     info = copy_mail_file(path, destination, expected, checkpoint, copying)
-                    cached[name] = (expected, info)
+                    reused=baseline is not None and baseline.get(mail_name_hex(name))==info
+                    if reused:
+                        os.unlink(destination)
+                    cached[name] = (expected, info, reused)
                 except MailChanged as exc:
                     failure = exc
                     if os.path.exists(destination):
@@ -264,7 +298,10 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
     for name, path, expected in before:
         relative = 'mail/raw/%06d.bin' % slots[name]
         info = cached[name][1]
-        manifest['files'][relative] = info
+        if cached[name][2]:
+            manifest['incremental']['reused_mail'][relative]=dict(info,name_bytes_hex=mail_name_hex(name))
+        else:
+            manifest['files'][relative] = info
         raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape' if sys.version_info[0]>=3 else 'strict')
         try:
             display_name = raw_name.decode('utf-8')
@@ -278,7 +315,8 @@ def copy_mail(template, user, folder, manifest, checkpoint, progress=lambda **fi
     path = os.path.join(folder, 'mail', 'sources.json')
     if not os.path.isdir(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), 0o700)
-    write_json(path, {'user': user, 'sources': sources, 'raw_files_complete': True})
+    reused=manifest.get('incremental',{}).get('reused_mail',{})
+    write_json(path, {'user': user, 'sources': sources, 'raw_files_complete': not bool(reused)})
     with open(path, 'rb') as stream:
         body = stream.read()
     manifest['files']['mail/sources.json'] = {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
@@ -378,11 +416,12 @@ def run_job(config_path, job_id):
     try:
         os.mkdir(work, 0o700)
         checkpoint()
+        baseline=parse_mail_baseline(request.get('mail_baseline'))
         if request.get('approvals') is True:
             stage = 'database'
             status('running', 'database')
             folder, intermediate = run_export(config['db_config'], user, work, cell=config['cell'],
-                                               binary=config.get('psql', '/usr/bin/psql'), live_scope=True)
+                                               binary=config.get('psql', '/usr/bin/psql'), live_scope=True,checkpoint=checkpoint)
             os.unlink(intermediate)
             manifest = read_json(os.path.join(folder, 'manifest.json'), 16 * 1024 * 1024)
         else:
@@ -400,8 +439,10 @@ def run_job(config_path, job_id):
         if request.get('mail') is True:
             stage = 'mail'
             status('running', 'mail')
+            if baseline is not None:
+                manifest['incremental']={'protocol':'segio-incremental/1','reused_mail':{},'basis':'content_sha256'}
             copy_mail(config.get('mail_template'), user, folder, manifest, checkpoint,
-                      lambda **fields: report('mail', **fields))
+                      lambda **fields: report('mail', **fields),baseline=baseline)
         manifest['live_export'] = {'requested_at': request['created_at'], 'job': job_id,
                                    'approvals': request.get('approvals') is True, 'mail': request.get('mail') is True}
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -456,6 +497,21 @@ def run_job(config_path, job_id):
     finally:
         if os.path.isdir(work):
             shutil.rmtree(work)
+        # Only an authenticated cleanup request creates this marker. Keep an
+        # owner receipt so a disconnected client can later confirm deletion.
+        if os.path.isfile(os.path.join(job,'discard-on-cancel')):
+            receipt=os.path.join(config['root'],'jobs','.'+job_id+'.cleanup.json')
+            proof={'protocol':PROTOCOL,'username':user,'job':job_id,
+                   'created_at':int(time.time()),'state':'cleanup_requested'}
+            try:
+                write_json(receipt,proof)
+                if os.path.isdir(job) and not os.path.islink(job):
+                    shutil.rmtree(job)
+                if not os.path.lexists(job):
+                    proof['state']='cleaned'
+                    write_json(receipt,proof)
+            except (IOError,OSError):
+                pass
 
 
 def control_response(operation, **fields):

@@ -15,17 +15,18 @@ from .mail_import import header_text, decode_bytes, PARSE_LIMIT
 from .web import CollectionError
 
 
-def digest_file(path, checkpoint=lambda: None):
+def digest_file(path, checkpoint=lambda: None, progress=lambda count: None):
     digest, size = hashlib.sha256(), 0
     with path.open('rb') as stream:
         while block := stream.read(1024 * 1024):
             checkpoint()
             digest.update(block)
             size += len(block)
+            progress(size)
     return {'bytes': size, 'sha256': digest.hexdigest()}
 
 
-def mbox_spans(path, checkpoint=lambda: None):
+def mbox_spans(path, checkpoint=lambda: None, progress=lambda count: None):
     """Scan bounded chunks, including delimiters straddling chunk boundaries."""
     with path.open('rb') as scanner, path.open('rb') as envelopes:
         first = envelopes.readline(65537)
@@ -48,6 +49,7 @@ def mbox_spans(path, checkpoint=lambda: None):
                 start = boundary + len(envelope)
                 offset = found + 6
             position += len(block)
+            progress(position)
             carry = data[-5:]
         if position > start:
             yield start, position
@@ -87,7 +89,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
         db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
         db.execute('CREATE TABLE mail_records (id TEXT PRIMARY KEY, source TEXT, begin INTEGER, end INTEGER, sender TEXT, receiver TEXT, date TEXT)')
         catalog = json.loads((root/'catalog.json').read_text(encoding='utf-8'))
-        for item in catalog['items']:
+        report('approval_index',0,len(catalog['items']),unit='messages')
+        for number,item in enumerate(catalog['items'],1):
             checkpoint()
             for name in (item['path'], item['json']):
                 safe_member(name)
@@ -97,6 +100,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                        ('approval-'+item['id'], 'approval', item['title'], '결재 문서', item['search'], item['path']))
             db.execute('INSERT INTO document_records VALUES (?,?)',
                        ('approval-'+item['id'], (root/item['json']).read_text(encoding='utf-8')))
+            report('approval_index',number,len(catalog['items']),unit='messages')
+        report('index',0,total_bytes,messages=0)
         for source in sources['sources']:
             checkpoint()
             name = source['path']
@@ -107,13 +112,14 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             path = root/name
             kind = source.get('format')
             if kind == 'mbox':
-                spans = mbox_spans(path, checkpoint)
+                spans = mbox_spans(path, checkpoint,
+                    lambda count:report('index',indexed_bytes+count,total_bytes,messages=mail_count))
             elif kind == 'rfc822':
                 spans = [(0, source['bytes'])]
             else:
                 issue_count += 1
                 indexed_bytes += source['bytes']
-                report('index', indexed_bytes, total_bytes)
+                report('index', indexed_bytes, total_bytes,messages=mail_count)
                 continue
             with path.open('rb') as stream, (closing(spans) if hasattr(spans,'close') else nullcontext()):
                 for start, end in spans:
@@ -127,12 +133,13 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                     db.execute('INSERT INTO mail_records VALUES (?,?,?,?,?,?,?)',
                                (identity, name, start, end, sender, receiver, date))
                     mail_count += 1
-                    report('index', indexed_bytes + end, total_bytes)
+                    report('index', indexed_bytes + end, total_bytes,messages=mail_count)
                     if mail_count % 1000 == 0:
                         db.commit()
                         log(f'메일 제목 색인 {mail_count:,}건')
             indexed_bytes += source['bytes']
-            report('index', indexed_bytes, total_bytes)
+            report('index', indexed_bytes, total_bytes,messages=mail_count)
+        report('index_finalize')
         db.execute('CREATE INDEX title_index ON items(kind,title)')
         db.commit()
     from .file_ops import replace_file
@@ -149,11 +156,14 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
         manifest['warnings'].append(warning)
     if issue_count:
         manifest['warnings'].append(f'인식하지 못한 메일 원본 파일 {issue_count}개는 원본 그대로 보존했습니다.')
-    files['catalog.sqlite3'] = digest_file(database, checkpoint)
+    size=database.stat().st_size
+    report('index_finalize',0,size)
+    files['catalog.sqlite3'] = digest_file(database, checkpoint,
+        lambda count:report('index_finalize',count,size))
     from .portable_mail import build_portable_mail
     manifest=build_portable_mail(root,manifest,checkpoint,log,progress)
     from .search_page import install_search_page
-    return install_search_page(root, manifest, checkpoint)
+    return install_search_page(root, manifest, checkpoint,progress)
 
 
 def search(root: Path, query='', kind='', page=0, mailbox='', category=''):

@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from optparse import OptionParser
 try:
@@ -223,7 +224,43 @@ def database_error_code(error):
     return "db_query_failed"
 
 
-def psql_readonly(config, work, sql, binary="/usr/bin/psql"):
+def communicate_cancellable(process, data, checkpoint):
+    if checkpoint is None:
+        return process.communicate(data)
+    result, errors = [], []
+    def receive():
+        try:
+            result.append(process.communicate(data))
+        except BaseException as exc:
+            errors.append(exc)
+    thread=threading.Thread(target=receive)
+    thread.daemon=True
+    thread.start()
+    try:
+        while thread.is_alive():
+            checkpoint()
+            thread.join(.2)
+        checkpoint()
+    except BaseException:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        thread.join(1)
+        if thread.is_alive() and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        thread.join(5)
+        raise
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
+def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
     try:
         host, user, database, password = connection_settings(read_config(config))
     except SafeError:
@@ -250,7 +287,7 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql"):
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError:
             raise SafeError("The configured psql client could not be started.", "psql_unavailable")
-        output, error = process.communicate(("\n".join(sql) + "\n").encode("ascii"))
+        output, error = communicate_cancellable(process,("\n".join(sql) + "\n").encode("ascii"),checkpoint)
         if process.returncode or b"SEGIO_DB_EXPORT_COMPLETE" not in output:
             code = database_error_code(error)
             raise SafeError("%s (psql exit %d); raw errors omitted." % (code, process.returncode), code)
@@ -260,7 +297,7 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql"):
             os.unlink(passfile)
 
 
-def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False):
+def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None):
     with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
         model = json.loads(stream.read().decode("utf-8"))
     queries = make_queries(username, model, live_scope)
@@ -272,7 +309,7 @@ def query_database(config, username, work, binary="/usr/bin/psql", live_scope=Fa
     for table in sorted(queries):
         sql.append(copy_command(queries[table], table, model[table]))
     sql.extend(["ROLLBACK;", "\\echo SEGIO_DB_EXPORT_COMPLETE"])
-    psql_readonly(config, work, sql, binary)
+    psql_readonly(config, work, sql, binary,checkpoint)
     expected = dict((r["table_name"], int(r["row_count"])) for r in read_rows(os.path.join(work, "counts.csv")))
     rows = dict((table, read_rows(os.path.join(work, table + ".csv"))) for table in model)
     if set(expected) != set(rows) or any(len(rows[t]) != expected[t] for t in rows):
@@ -653,7 +690,7 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None):
     notify = progress or (lambda message: None)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
         raise SafeError("Use an exact employee ID containing letters, digits, _, ., @ or -.")
@@ -668,7 +705,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     success = False
     try:
         notify("Reading approval records in one read-only DB snapshot...")
-        rows, counts = query_database(config, username, work, binary, live_scope)
+        rows, counts = query_database(config, username, work, binary, live_scope,checkpoint)
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
         shutil.rmtree(work)

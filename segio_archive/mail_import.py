@@ -68,7 +68,9 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
     if sources.get('user', user) != user:
         raise CollectionError('메일 원본의 사용자 ID가 일치하지 않습니다.')
     raw_bytes = 0
-    for source in sources['sources']:
+    report=progress or (lambda *args,**kwargs:None)
+    report('prepare_mail',0,len(sources['sources']),unit='files')
+    for number,source in enumerate(sources['sources'],1):
         checkpoint()
         name = source['path']
         safe_member(name)
@@ -86,6 +88,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
                   bool(re.search(rb'(?im)^(return-path|delivered-to|received|date|from|to|subject|message-id|mime-version|content-type):', prefix)))
         source['format'] = 'mbox' if is_mbox else 'rfc822' if is_eml else 'unrecognized'
         if not is_mbox and not is_eml:
+            report('prepare_mail',number,len(sources['sources']),unit='files')
             continue
         renamed = str(Path(name).with_suffix('.mbox' if is_mbox else '.eml')).replace('\\','/')
         if renamed != name:
@@ -98,6 +101,7 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None, log=lamb
         atomic_write(sources_file, json.dumps(sources,ensure_ascii=False,indent=2).encode('utf-8'))
         files['mail/sources.json'] = digest_file(sources_file)
         atomic_write(root/'manifest.json', json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+        report('prepare_mail',number,len(sources['sources']),unit='files')
     if sources_file.exists():
         atomic_write(sources_file, json.dumps(sources,ensure_ascii=False,indent=2).encode('utf-8'))
         files['mail/sources.json'] = digest_file(sources_file)

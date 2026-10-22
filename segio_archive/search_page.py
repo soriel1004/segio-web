@@ -9,7 +9,7 @@ from .archive import atomic_write
 from .mail_folders import MailFolders
 from .index_metadata import IndexMetadata, CATEGORIES, item_date
 
-VERSION = 'offline-search/5'
+VERSION = 'offline-search/6'
 CHUNK_SIZE = 500
 
 
@@ -18,7 +18,7 @@ def script_json(value):
     return json.dumps(value, ensure_ascii=True, separators=(',', ':')).replace('<', '\\u003c')
 
 
-def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
+def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, progress=None):
     """Update only presentation/search metadata; never read or rewrite raw MBOX."""
     root = root.resolve()
     existing = manifest is None
@@ -42,6 +42,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
         files[name] = {'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
 
     folders=MailFolders(root)
+    report=progress or (lambda *args,**kwargs:None)
     approval_counts={key:0 for key in CATEGORIES}
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
         boxes=folders.boxes(db)
@@ -49,7 +50,10 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
         for kind, count in db.execute('SELECT kind,count(*) FROM items GROUP BY kind'):
             if kind in counts:
                 counts[kind] = count
+        done,total=0,sum(counts.values())
+        report('search')
         cursor = db.execute('SELECT i.id,i.kind,i.title,i.folders,i.html,i.body,'+meta.date_sql+','+meta.payload_sql+' FROM items i '+meta.joins+' ORDER BY '+meta.order)
+        report('search',0,total,unit='messages')
         with closing(cursor):
             while rows := cursor.fetchmany(CHUNK_SIZE):
                 checkpoint()
@@ -69,6 +73,8 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
                 rows=packed
                 write(name, 'window.archiveChunk='+script_json(rows)+';')
                 chunks.append(name)
+                done+=len(rows)
+                report('search',done,total,unit='messages')
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes, 'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
     if manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1':
@@ -87,7 +93,7 @@ INDEX = r'''<!doctype html><html lang="ko"><meta charset="utf-8">
 body{font:12px 'Malgun Gothic',sans-serif;line-height:1.6;background:#f3f5f8;color:#162234;max-width:1100px;margin:24px auto;padding:0 18px}
 h1{font-size:20px}h2{font-size:14px;margin:0}input,button,select{font:inherit;box-sizing:border-box}button{cursor:pointer;padding:8px 18px;border:1px solid #a4b1c2;background:white;border-radius:5px}button:disabled{cursor:default;opacity:.45}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #075b9c;outline-offset:2px}
 #search-form{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}#q{flex:1;min-width:160px;padding:10px;border:1px solid #a4b1c2;border-radius:5px}#scope{padding:8px;border:1px solid #a4b1c2;border-radius:5px;background:white}#search-button,[role=tab][aria-selected=true]{background:#075b9c;color:white;border-color:#075b9c}
-[role=tablist]{display:flex;gap:8px;border-bottom:2px solid #075b9c;padding-bottom:8px}#mail-folders,#approval-folders{background:white;border:1px solid #d8e0e9;border-radius:6px;padding:12px;margin:12px 0}.box-list{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow:auto}.box-list button{padding:6px 12px}.box-list button[aria-pressed=true]{background:#075b9c;color:white;border-color:#075b9c}#custom-mailboxes h2{font-size:12px;margin:12px 0 6px}#list-head{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:8px 12px;font-weight:bold}#summary{margin:12px 0}#results{background:white;border:1px solid #d8e0e9;border-radius:6px}article{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:12px;border-bottom:1px solid #e3e8ef;align-items:center}article:last-child{border-bottom:0}article h2{font-size:12px;font-weight:normal;overflow-wrap:anywhere}article p{margin:0;overflow-wrap:anywhere;color:#526176}a{color:#075b9c}#notice{color:#76551b}#pagination{display:flex;gap:14px;align-items:center;margin-top:16px}#empty{padding:20px}@media(max-width:600px){article{grid-template-columns:35px minmax(0,1fr)}article p{grid-column:2}}
+[role=tablist]{display:flex;gap:8px;border-bottom:2px solid #075b9c;padding-bottom:8px}#mail-folders,#approval-folders{background:white;border:1px solid #d8e0e9;border-radius:6px;padding:12px;margin:12px 0}.box-list{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow:auto}.box-list button{padding:6px 12px}.box-list button[aria-pressed=true]{background:#075b9c;color:white;border-color:#075b9c}#custom-mailboxes h2{font-size:12px;margin:12px 0 6px}#list-head{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:8px 12px;font-weight:bold}#summary{margin:12px 0}#results{background:white;border:1px solid #d8e0e9;border-radius:6px}article{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:12px;border-bottom:1px solid #e3e8ef;align-items:center}article:last-child{border-bottom:0}article:hover,article:focus-within{background:#eaf3ff}article h2 a{text-decoration:none;display:block}article h2 a:focus-visible{outline:2px solid #075b9c;outline-offset:3px}article h2{font-size:12px;font-weight:normal;overflow-wrap:anywhere}article p{margin:0;overflow-wrap:anywhere;color:#526176}a{color:#075b9c}#notice{color:#76551b}#pagination{display:flex;gap:14px;align-items:center;margin-top:16px}#empty{padding:20px}@media(max-width:600px){article{grid-template-columns:35px minmax(0,1fr)}article p{grid-column:2}}
 </style>
 <h1>그룹웨어 문서 및 메일 백업 및 검색</h1>
 <p>메일 제목·보낸 사람·받는 사람과 결재 내용을 검색합니다. 한 페이지에 100건씩 표시합니다.</p>

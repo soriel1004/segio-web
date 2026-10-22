@@ -30,6 +30,29 @@ def navigate(test, page, url):
 
 
 class SearchPageTests(unittest.TestCase):
+    @unittest.skipUnless(BROWSER,'Chromium is required')
+    def test_title_links_have_no_underline_and_hover_and_focus_highlight_the_row(self):
+        from playwright.sync_api import sync_playwright,expect
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            self.fixture(root)
+            viewer=Viewer(root)
+            try:
+                with sync_playwright() as p:
+                    browser=p.chromium.launch(headless=True,executable_path=BROWSER)
+                    try:
+                        page=browser.new_page()
+                        page.goto(viewer.url)
+                        link=page.locator('article h2 a').first
+                        expect(link).to_be_visible()
+                        self.assertEqual(link.evaluate('(e)=>getComputedStyle(e).textDecorationLine'),'none')
+                        link.hover()
+                        self.assertEqual(page.locator('article').first.evaluate('(e)=>getComputedStyle(e).backgroundColor'),'rgb(234, 243, 255)')
+                        link.focus()
+                        page.locator('h1').hover()
+                        self.assertEqual(page.locator('article').first.evaluate('(e)=>getComputedStyle(e).backgroundColor'),'rgb(234, 243, 255)')
+                    finally:browser.close()
+            finally:viewer.close()
     def fixture(self, root, approvals=True):
         (root/'index.html').write_text('Old search page', encoding='utf-8')
         (root/'mail').mkdir()
@@ -65,7 +88,7 @@ class SearchPageTests(unittest.TestCase):
                 viewer=Viewer(root)
                 viewer.close()
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/5')
+            self.assertEqual(updated['browser_index'],'offline-search/6')
             self.assertEqual(updated['files']['mail/original.mbox'],old['files']['mail/original.mbox'])
             self.assertEqual(digest_file(root/'catalog.sqlite3'),old['files']['catalog.sqlite3'])
             self.assertTrue(verify_archive(root)['ok'])
