@@ -920,7 +920,8 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
             second=DBCollector(config).run(PASSWORD)
             latest=json.loads((second/'manifest.json').read_text(encoding='utf-8'))
             self.assertNotEqual(original_manifest['live_export']['job'],latest['live_export']['job'])
-            self.assertEqual(second.name,'segio-employee-2')
+            self.assertRegex(path.name,r'^segio-employee-[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+            self.assertEqual(second.name,path.name+'-2')
             with closing(sqlite3.connect(second/'catalog.sqlite3')) as database:
                 self.assertEqual(database.execute("SELECT title FROM items WHERE kind='approval'").fetchone()[0],'요청 후 변경된 최신 DB')
             viewer=Viewer(path)

@@ -215,10 +215,18 @@ def publish_local(staging, archive, output, username):
     raise CollectionError("같은 이름의 보관함이 너무 많습니다. 다른 저장 폴더를 선택하세요.")
 
 
-def reserve_personal_folder(output, username):
+def backup_date(now=None):
+    korea=timezone(timedelta(hours=9))
+    return (now or datetime.now(korea)).astimezone(korea).strftime('%Y-%m-%d')
+
+
+def reserve_personal_folder(output, username, day=None):
     """Index in the final reserved folder, never move open verified originals."""
+    day=day or backup_date()
+    if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}',day):
+        raise CollectionError('백업 날짜 형식을 확인하지 못했습니다.')
     for number in range(1, 100000):
-        name = 'segio-' + safe_name(username, 100) + (f'-{number}' if number > 1 else '')
+        name = 'segio-' + safe_name(username, 100) + '-'+day+(f'-{number}' if number > 1 else '')
         folder = output/name
         if (output/(name + '.zip')).exists():
             continue
@@ -241,6 +249,7 @@ class PreparedDBCollector(Collector):
         self.user_agent = None
         self.owned_folders = []
         self.local_discard_confirmed = False
+        self.backup_day=None
         self.commit_finished = False
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
             raise CollectionError("정확한 그룹웨어 ID를 입력하세요.")
@@ -358,7 +367,7 @@ class PreparedDBCollector(Collector):
             else:
                 # Verify directly into a reserved persistent folder. Once
                 # verified, temporary cleanup must never delete these files.
-                destination = reserve_personal_folder(output, self.config.username)
+                destination = reserve_personal_folder(output, self.config.username,self.backup_day)
                 self.owned_folders.append(destination)
                 try:
                     unpack_verified(archive, destination, self.config.username, self.checkpoint, self.progress)
@@ -404,6 +413,7 @@ class PreparedDBCollector(Collector):
         self.owned_folders=[]
         self.local_discard_confirmed=False
         self.commit_finished=False
+        self.backup_day=backup_date()
         self.reset_remote_job()
         try:
             self.checkpoint()

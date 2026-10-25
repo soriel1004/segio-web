@@ -14,6 +14,7 @@ from .browser import BrowserUnavailable
 from .web import Cancelled, CollectionError, Config, DEFAULT_SERVER
 from . import __version__
 from .progress import ProgressReporter, describe_progress
+from .preferences import load_output_folder, save_output_folder
 
 DB_MODE = "개인 SEGIO 로그인으로 자료 받기"
 APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
@@ -35,7 +36,12 @@ class App(tk.Tk):
         self.server = tk.StringVar(value=DEFAULT_SERVER)
         self.user = tk.StringVar()
         self.password = tk.StringVar()
-        self.folder = tk.StringVar(value=str(Path.home() / "Documents" / "SEGIO보관함"))
+        self._saved_folder=load_output_folder(Path.home()/"Documents"/"SEGIO보관함")
+        self.folder = tk.StringVar(value=self._saved_folder)
+        self._folder_job=None
+        self._startup_job=None
+        self._poll_job=None
+        self._console_job=None
         self.approvals = tk.BooleanVar(value=True)
         self.mail = tk.BooleanVar(value=True)
         self.pdf = tk.BooleanVar(value=False)
@@ -51,10 +57,12 @@ class App(tk.Tk):
         self.started_at = None
         self.elapsed_seconds = 0
         self.build()
-        self.after(100, self.poll)
+        self.folder.trace_add('write',self.folder_changed)
+        self._poll_job=self.after(100, self.poll)
         self.protocol("WM_DELETE_WINDOW", self.close)
         from .window_control import minimize_console
-        self.after_idle(minimize_console)
+        self._console_job=self.after_idle(minimize_console)
+        self._startup_job=self.after_idle(self.notify_startup_ready)
 
     def build(self):
         panel = ttk.Frame(self, padding=24)
@@ -79,18 +87,19 @@ class App(tk.Tk):
         ttk.Label(folder_row,text='Windows 저장 폴더',width=20).pack(side='left')
         ttk.Entry(folder_row,textvariable=self.folder).pack(side='left',fill='x',expand=True)
         ttk.Button(folder_row,text='선택',command=self.choose_folder).pack(side='left',padx=(8,0))
-        mode_row=ttk.Frame(panel)
+        self.backup_scope_frame=ttk.LabelFrame(panel,text='백업 범위',padding=(12,8))
+        self.backup_scope_frame.pack(fill='x',pady=(8,10))
+        mode_row=ttk.Frame(self.backup_scope_frame)
         mode_row.pack(fill='x',pady=5)
-        ttk.Label(mode_row,text='백업 범위',width=20).pack(side='left')
         ttk.Radiobutton(mode_row,text='처음부터 전체 백업',variable=self.backup_mode,value='full',command=self.backup_mode_changed).pack(side='left')
-        ttk.Radiobutton(mode_row,text='이전 백업 이후 추가 · 기존 폴더 반영',variable=self.backup_mode,value='incremental',command=self.backup_mode_changed).pack(side='left',padx=12)
-        baseline_row=ttk.Frame(panel)
+        ttk.Radiobutton(mode_row,text='백업 추가 (기존 백업에 추가 됩니다.)',variable=self.backup_mode,value='incremental',command=self.backup_mode_changed).pack(side='left',padx=12)
+        baseline_row=ttk.Frame(self.backup_scope_frame)
         baseline_row.pack(fill='x',pady=(0,5))
         ttk.Label(baseline_row,text='반영할 기존 백업',width=20).pack(side='left')
         ttk.Entry(baseline_row,textvariable=self.baseline_folder,state='readonly').pack(side='left',fill='x',expand=True)
         self.baseline_button=ttk.Button(baseline_row,text='선택',command=self.choose_baseline,state='disabled')
         self.baseline_button.pack(side='left',padx=(8,0))
-        ttk.Label(panel,textvariable=self.backup_hint,wraplength=780).pack(fill='x',pady=(0,5))
+        ttk.Label(self.backup_scope_frame,textvariable=self.backup_hint,wraplength=730).pack(fill='x',pady=(0,5))
         choices = ttk.Frame(panel)
         choices.pack(fill="x")
         self.collection_choices = []
@@ -123,9 +132,32 @@ class App(tk.Tk):
         ttk.Label(panel, text="수집 후 오프라인 열람·누락 대조를 수행하세요. 계정 삭제 영향 시험과 서버 전체 백업은 별도입니다.", wraplength=770).pack(anchor="w", pady=(10, 0))
 
     def choose_folder(self):
-        value = filedialog.askdirectory(title="백업을 저장할 상위 폴더")
+        value = filedialog.askdirectory(title="백업을 저장할 상위 폴더",initialdir=self.folder.get())
         if value:
             self.folder.set(value)
+
+    def notify_startup_ready(self):
+        from .startup_notice import mark_ready
+        self._startup_job=None
+        if not self.winfo_viewable() or not mark_ready():
+            self._startup_job=self.after(100,self.notify_startup_ready)
+
+    def folder_changed(self,*_):
+        if self._folder_job is not None:
+            self.after_cancel(self._folder_job)
+        self._folder_job=self.after(600,self.remember_folder)
+
+    def remember_folder(self):
+        if self._folder_job is not None:
+            self.after_cancel(self._folder_job)
+            self._folder_job=None
+        value=self.folder.get().strip()
+        if not value or value==self._saved_folder:
+            return
+        if save_output_folder(value):
+            self._saved_folder=value
+        else:
+            self.events.put(('log','다음 실행에 사용할 저장 폴더를 기억하지 못했습니다. 이번 백업의 저장 위치는 그대로 사용합니다.'))
 
     def backup_mode_changed(self):
         self.baseline_button.config(state='normal' if self.backup_mode.get()=='incremental' else 'disabled')
@@ -163,6 +195,7 @@ class App(tk.Tk):
         except Exception as exc:
             return messagebox.showerror("입력 확인", str(exc))
         self.password.set("")
+        self.remember_folder()
         self.active_config=config
         self.running = True
         self.start_button.config(state="disabled")
@@ -196,6 +229,9 @@ class App(tk.Tk):
             password = ""
 
     def poll(self):
+        if self._poll_job is not None:
+            self.after_cancel(self._poll_job)
+            self._poll_job=None
         try:
             while True:
                 event, value = self.events.get_nowait()
@@ -258,7 +294,7 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.refresh_progress_text()
-        self.after(100, self.poll)
+        self._poll_job=self.after(100, self.poll)
 
     def mail_warning(self,path,manifest):
         info=manifest.get('portable_mail',{})
@@ -413,6 +449,12 @@ class App(tk.Tk):
         if self.running:
             messagebox.showinfo("수집 중", "‘중단’을 누르고 현재 요청이 끝난 뒤 창을 닫아주세요.")
             return
+        self.remember_folder()
+        for name in ('_startup_job','_console_job','_poll_job'):
+            job=getattr(self,name)
+            if job is not None:
+                self.after_cancel(job)
+                setattr(self,name,None)
         if self.viewer:
             self.viewer.close()
         self.destroy()
