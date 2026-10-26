@@ -204,9 +204,11 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint,progress)
 
 
-def search(root: Path, query='', kind='', page=0, mailbox='', category=''):
+def search(root: Path, query='', kind='', page=0, mailbox='', category='', page_size=100):
     from .mail_folders import MailFolders
     from .index_metadata import IndexMetadata, CATEGORIES, item_date
+    if not isinstance(page_size, int) or not 1 <= page_size <= 1000:
+        raise ValueError('페이지당 표시 수는 1~1,000 사이의 정수여야 합니다.')
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
@@ -228,7 +230,7 @@ def search(root: Path, query='', kind='', page=0, mailbox='', category=''):
         total = db.execute('SELECT count(*)'+origin, parameters).fetchone()[0]
         fields = 'i.id,i.kind,i.title,'+folder_label+",i.html,CASE WHEN i.kind='mail' THEN mailbox_key(i.folders) ELSE '' END,i.folders,"
         rows = db.execute('SELECT '+fields+meta.date_sql+','+meta.payload_sql+origin+
-                          ' ORDER BY '+meta.order+' LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
+                          ' ORDER BY '+meta.order+' LIMIT ? OFFSET ?', parameters+[page_size,max(0,min(page,1000000))*page_size]).fetchall()
     items=[]
     from .portable_mail import page_path
     for row in rows:

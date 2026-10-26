@@ -94,7 +94,7 @@ class MailFolderTests(unittest.TestCase):
             with patch.object(Path,'open',guarded):
                 prepare_archive(root)
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/7')
+            self.assertEqual(updated['browser_index'],'offline-search/8')
             for name,info in previous.items():
                 self.assertEqual(digest_file(root/name),info)
             self.assertTrue(verify_archive(root)['ok'])

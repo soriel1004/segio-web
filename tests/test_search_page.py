@@ -1,5 +1,6 @@
 from contextlib import closing
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -7,9 +8,11 @@ import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import urlopen
 
 from segio_archive.archive import verify_archive
-from segio_archive.compact_mail import digest_file
+from segio_archive.compact_mail import digest_file, search
 from segio_archive.search_page import install_search_page
 from segio_archive.viewer import Viewer
 
@@ -30,6 +33,123 @@ def navigate(test, page, url):
 
 
 class SearchPageTests(unittest.TestCase):
+    def test_page_sizes_offsets_last_page_and_invalid_api_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            self.fixture(root)
+            viewer=Viewer(root)
+            try:
+                endpoint=viewer.url.rsplit('/',1)[0]+'/api/search?kind=mail&'
+                self.assertEqual(len(search(root,kind='mail')['items']),100)
+                for size in (1,25,37,50,75,100,1000):
+                    with self.subTest(size=size):
+                        with urlopen(endpoint+f'page_size={size}&page=1') as response:
+                            data=json.load(response)
+                        self.assertEqual(data['total'],1102)
+                        self.assertEqual(len(data['items']),min(size,1102-size))
+                        self.assertEqual(data['items'][0]['id'],f'mail-{size:09d}')
+                        last=(1102-1)//size
+                        data=search(root,kind='mail',page=last,page_size=size)
+                        self.assertEqual(len(data['items']),1102-last*size)
+                        self.assertEqual(data['items'][-1]['id'],'mail-000001101')
+                for value in ('0','-1','1001','1.5','abc','1 OR 1=1'):
+                    with self.subTest(invalid=value):
+                        from urllib.parse import quote
+                        with self.assertRaises(HTTPError) as caught:
+                            urlopen(endpoint+'page_size='+quote(value))
+                        self.assertEqual(caught.exception.code,400)
+                        caught.exception.close()
+            finally:viewer.close()
+
+    @unittest.skipUnless(BROWSER,'Chromium is required')
+    def test_page_size_presets_custom_input_search_and_tabs_in_both_search_modes(self):
+        from playwright.sync_api import sync_playwright,expect
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            manifest=self.fixture(root)
+            with closing(sqlite3.connect(root/'catalog.sqlite3')) as db:
+                db.executemany('INSERT INTO items VALUES (?,?,?,?,?,?)',
+                    [(f'extra-{i:03d}','approval',f'추가 결재 {i:03d}','결재 문서','내용','documents/1/index.html') for i in range(130)])
+                db.commit()
+            manifest['files']['catalog.sqlite3']=digest_file(root/'catalog.sqlite3')
+            (root/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+            viewer=Viewer(root)
+            try:
+                html=(root/'index.html').read_text(encoding='utf-8')
+                with sync_playwright() as p:
+                    browser=p.chromium.launch(headless=True,executable_path=BROWSER)
+                    try:
+                        for offline in (False,True):
+                            with self.subTest(offline_chunks=offline):
+                                page=browser.new_page()
+                                requests=[]
+                                page.on('request',lambda request:requests.append(request.url))
+                                if offline:
+                                    page.route('**/index.html',lambda route:route.fulfill(content_type='text/html',
+                                        body=html.replace("offline=location.protocol==='file:'",'offline=true')))
+                                page.goto(viewer.url)
+                                expect(page.locator('article')).to_have_count(100)
+                                page.locator('#tab-mail').click()
+                                expect(page.locator('#summary')).to_contain_text('1,102건')
+                                for size in (25,50,75,100):
+                                    page.locator('#page-size').select_option(str(size))
+                                    expect(page.locator('article')).to_have_count(size)
+                                    expect(page.locator('#page')).to_have_text(f'1 / {math.ceil(1102/size)}')
+                                    expect(page.locator('#custom-page-size')).to_be_hidden()
+                                    page.locator('#next').click()
+                                    expect(page.locator('article h2').first).to_have_text(f'메일 {size:04d}')
+                                    expect(page.locator('article > span').first).to_have_text(str(size+1))
+                                page.locator('#page-size').select_option('custom')
+                                input=page.locator('#page-size-input')
+                                for invalid in ('','0','-1','1001','2.5'):
+                                    input.fill(invalid)
+                                    input.press('Enter')
+                                    self.assertFalse(input.evaluate('(e)=>e.checkValidity()'))
+                                    expect(page.locator('#page')).to_have_text('2 / 12')
+                                    expect(page.locator('article')).to_have_count(100)
+                                input.fill('37')
+                                input.press('Enter')
+                                expect(page.locator('article')).to_have_count(37)
+                                expect(page.locator('#page')).to_have_text('1 / 30')
+                                page.locator('#next').click()
+                                expect(page.locator('article h2').first).to_have_text('메일 0037')
+                                page.locator('#q').fill('sender@example.test')
+                                page.locator('#q').press('Enter')
+                                expect(page.locator('#page')).to_have_text('1 / 30')
+                                expect(page.locator('article')).to_have_count(37)
+                                page.locator('#q').fill('100%_한글')
+                                page.locator('#search-button').click()
+                                expect(page.locator('article')).to_have_count(1)
+                                expect(page.locator('#page')).to_have_text('1 / 1')
+                                expect(page.locator('#next')).to_be_disabled()
+                                page.locator('#q').fill('')
+                                page.locator('#search-button').click()
+                                page.locator('#tab-approval').click()
+                                expect(page.locator('#summary')).to_contain_text('131건')
+                                expect(page.locator('article')).to_have_count(37)
+                                page.locator('#tab-all').click()
+                                expect(page.locator('#summary')).to_contain_text('1,233건')
+                                expect(page.locator('article')).to_have_count(37)
+                                input.fill('1000')
+                                page.locator('#page-size-form button').click()
+                                expect(page.locator('article')).to_have_count(1000)
+                                page.locator('#next').click()
+                                expect(page.locator('article')).to_have_count(233)
+                                expect(page.locator('article > span').first).to_have_text('1001')
+                                expect(page.locator('#next')).to_be_disabled()
+                                page.locator('#prev').click()
+                                expect(page.locator('article')).to_have_count(1000)
+                                input.fill('1')
+                                page.locator('#page-size-form button').click()
+                                expect(page.locator('article')).to_have_count(1)
+                                expect(page.locator('#page')).to_have_text('1 / 1233')
+                                page.locator('#page-size').select_option('25')
+                                expect(page.locator('article')).to_have_count(25)
+                                self.assertEqual(any('/api/search?' in url for url in requests),not offline)
+                                page.close()
+                    finally:browser.close()
+            finally:viewer.close()
+
     @unittest.skipUnless(BROWSER,'Chromium is required')
     def test_title_links_have_no_underline_and_hover_and_focus_highlight_the_row(self):
         from playwright.sync_api import sync_playwright,expect
@@ -88,7 +208,7 @@ class SearchPageTests(unittest.TestCase):
                 viewer=Viewer(root)
                 viewer.close()
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/7')
+            self.assertEqual(updated['browser_index'],'offline-search/8')
             self.assertEqual(updated['files']['mail/original.mbox'],old['files']['mail/original.mbox'])
             self.assertEqual(digest_file(root/'catalog.sqlite3'),old['files']['catalog.sqlite3'])
             self.assertTrue(verify_archive(root)['ok'])

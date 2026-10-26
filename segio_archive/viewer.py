@@ -52,7 +52,8 @@ class Viewer:
                     try:
                         fields = parse_qs(urlsplit(self.path).query)
                         data = search(owner.folder, fields.get('q',[''])[0], fields.get('kind',[''])[0],
-                                      int(fields.get('page',['0'])[0]),fields.get('mailbox',[''])[0],fields.get('category',[''])[0])
+                                      int(fields.get('page',['0'])[0]),fields.get('mailbox',[''])[0],fields.get('category',[''])[0],
+                                      page_size=int(fields.get('page_size',['100'])[0]))
                         return self.payload(json.dumps(data,ensure_ascii=False).encode('utf-8'), 'application/json', head)
                     except Exception:
                         return self.send_error(400)
