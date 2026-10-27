@@ -30,13 +30,16 @@ class DateIncrementalTests(unittest.TestCase):
         self.base = DateBaseline(self.old, 'employee')
         self.old_inodes = {entry[2][:2] for entry in worker.inventory(str(self.mail))}
 
-    def export(self, number, base=None, changed=()):
+    def export(self, number, base=None, changed=(), approvals=True, mail=True):
         identifier = '%032x' % number
         job = self.root/'jobs'/identifier
         job.mkdir()
-        request = {'username':'employee','approvals':True,'mail':True,'created_at':int(time.time())}
+        request = {'username':'employee','approvals':approvals,'mail':mail,'created_at':int(time.time())}
         if base:
-            request['mail_since'] = str(base.since)
+            if mail:
+                request['mail_since'] = str(base.since)
+            if approvals and base.approval_since is not None:
+                request['approval_since'] = str(base.approval_since)
         worker.write_json(str(job/'request.json'),request)
         changed_inodes = {worker.fingerprint(str(self.mail/name))[:2] for name in changed}
         def timestamp(identity):
@@ -66,6 +69,7 @@ class DateIncrementalTests(unittest.TestCase):
     def prepare(self, target, base=None):
         base = base or self.base
         base.validate_delta(target)
+        base.validate_approval_delta(json.loads((target/'manifest.json').read_bytes()))
         base.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None)
         build_local_catalog(target,'employee')
         self.assertTrue(verify_archive(target)['ok'])
@@ -196,7 +200,7 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertEqual(before,self.snapshot())
         self.assertFalse(journal.exists())
 
-    def test_old_server_deleted_mail_remains_in_existing_backup_and_approval_updates(self):
+    def test_old_server_deleted_mail_and_old_draft_remain_as_previously_backed_up(self):
         (self.mail/'inbox.mbox').unlink()
         records=json.loads((self.root/'database.json').read_bytes())
         records['employee']['title']='Updated old approval'
@@ -204,7 +208,75 @@ class DateIncrementalTests(unittest.TestCase):
         target=self.export(2,self.base)
         self.prepare(target)
         self.assertEqual(search(target,kind='mail')['total'],3)
-        self.assertEqual(search(target,'Updated old approval',kind='approval')['total'],1)
+        self.assertEqual(search(target,'Updated old approval',kind='approval')['total'],0)
+        self.assertEqual(search(target,'현재 DB 첫 문서',kind='approval')['total'],1)
+
+    def test_only_new_drafts_merge_and_old_draft_status_changes_are_not_fetched(self):
+        cutoff=self.base.approval_since
+        records=json.loads((self.root/'database.json').read_bytes())
+        records['employee']={'documents':[
+            {'no':'1','title':'Old draft completed later','wdate':cutoff-100,'cdate':cutoff+1,'progress':'완료'},
+            {'no':'2','title':'New draft at boundary','wdate':cutoff},
+            {'no':'3','title':'New draft after backup','wdate':cutoff+1},
+            {'no':'4','title':'Unknown draft date','wdate':'unknown'}]}
+        (self.root/'database.json').write_text(json.dumps(records))
+        target=self.export(2,self.base)
+        received=json.loads((target/'catalog.json').read_bytes())['items']
+        self.assertEqual([item['id'] for item in received],['2','3'])
+        self.assertFalse((target/'documents/1').exists())
+        self.prepare(target)
+        self.assertEqual(search(target,kind='approval')['total'],3)
+        self.assertEqual(search(target,'현재 DB 첫 문서',kind='approval')['total'],1)
+        self.assertEqual(search(target,'Old draft completed later',kind='approval')['total'],0)
+        self.assertEqual(search(target,'New draft',kind='approval')['total'],2)
+        self.assertTrue(verify_archive(target)['ok'])
+        manifest=json.loads((target/'manifest.json').read_bytes())
+        self.assertEqual(manifest['approval_delta']['basis'],'document_wdate')
+        self.assertEqual(manifest['last_incremental']['received_approval_documents'],2)
+
+    def test_mail_only_update_keeps_approval_clock_and_legacy_baselines_have_safe_fallbacks(self):
+        target=self.export(2,self.base,approvals=False)
+        self.assertNotIn('approval_checkpoint',json.loads((target/'manifest.json').read_bytes()))
+        self.base.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None,approvals=False)
+        manifest=json.loads((target/'manifest.json').read_bytes())
+        self.assertEqual(manifest['approval_checkpoint'],self.base.approval_since)
+        path=self.old/'manifest.json'
+        legacy=json.loads(path.read_bytes())
+        legacy.pop('approval_checkpoint')
+        path.write_text(json.dumps(legacy))
+        self.assertEqual(DateBaseline(self.old,'employee').approval_since,legacy['live_export']['requested_at'])
+        legacy['live_export']['approvals']=False
+        path.write_text(json.dumps(legacy))
+        self.assertIsNone(DateBaseline(self.old,'employee').approval_since)
+
+    def test_approval_only_update_keeps_the_previous_mail_clock_and_raw_mail(self):
+        records=json.loads((self.root/'database.json').read_bytes())
+        records['employee']={'no':'2','title':'New approval without mail','wdate':self.base.approval_since}
+        (self.root/'database.json').write_text(json.dumps(records))
+        target=self.export(2,self.base,mail=False)
+        self.base.validate_approval_delta(json.loads((target/'manifest.json').read_bytes()))
+        self.base.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None,mail=False)
+        build_local_catalog(target,'employee')
+        manifest=json.loads((target/'manifest.json').read_bytes())
+        self.assertEqual(manifest['mail_checkpoint'],self.base.since)
+        self.assertEqual(search(target,kind='mail')['total'],3)
+        self.assertEqual(search(target,kind='approval')['total'],2)
+        self.assertTrue(verify_archive(target)['ok'])
+
+    def test_approval_delta_requires_exact_since_basis_revision_and_clock(self):
+        target=self.export(2,self.base)
+        manifest=json.loads((target/'manifest.json').read_bytes())
+        self.base.validate_approval_delta(manifest)
+        import copy
+        for key,value in (('since',self.base.approval_since+1),('basis','completion_date'),
+                          ('revision','other'),('protocol','other')):
+            invalid=copy.deepcopy(manifest)
+            invalid['approval_delta'][key]=value
+            with self.assertRaises(CollectionError):self.base.validate_approval_delta(invalid)
+        for value in (None,0,True,self.base.approval_since-1):
+            invalid=copy.deepcopy(manifest)
+            invalid['approval_checkpoint']=value
+            with self.assertRaises(CollectionError):self.base.validate_approval_delta(invalid)
 
     def test_file_timestamp_selection_is_inclusive_and_does_not_use_date_header(self):
         identity=(1,2,100,1000.0,1500.0)

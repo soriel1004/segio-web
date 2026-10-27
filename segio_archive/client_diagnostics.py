@@ -18,7 +18,7 @@ PHASES = {'시작','브라우저 시작','SEGIO 로그인','서버 연결 기능
           '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성',
           '이전 백업 확인','기존 백업 반영 준비'}
 ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARGE',
-               'service_not_configured','job_not_found','BRIDGE_STATUS_NOT_FOUND','invalid_baseline',
+               'service_not_configured','job_not_found','BRIDGE_STATUS_NOT_FOUND','invalid_baseline','invalid_approval_since',
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
                'LOGIN_ORIGIN_MISMATCH','LOGIN_NOT_CONFIRMED','BRIDGE_REDIRECT',
                'TIMEOUT','LOGIN_FRAME_TRANSITION','BROWSER_CONNECTION_ERROR',

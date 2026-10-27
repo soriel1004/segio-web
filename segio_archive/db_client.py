@@ -635,6 +635,7 @@ class DBCollector(PreparedDBCollector):
             'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
             'mail_changed_retry':'서버 메일이 변경되어 안정적인 원본을 확보하지 못했습니다. 메일 정리·이동을 멈추고 다시 실행하거나 메일 사용이 적은 시간에 실행하세요.',
             'invalid_mail_since':'이전 백업의 서버 기준 시각을 사용할 수 없습니다. 서버 시계와 이전 백업 완료 상태를 확인하세요.',
+            'invalid_approval_since':'이전 결재 백업의 기준 시각을 사용할 수 없습니다. 서버 시계와 이전 백업 완료 상태를 확인하세요. [invalid_approval_since]',
             'export_already_running':'이 직원의 추출 작업이 이미 진행 중입니다. 완료 후 다시 실행하세요.',
             'export_busy':'서버에서 다른 추출 작업이 진행 중입니다. 잠시 후 다시 실행하세요.',
             'export_process_unavailable':'서버 추출 작업기를 시작하지 못했습니다. Python·실행 계정 권한을 확인하세요.',
@@ -766,11 +767,20 @@ class DBCollector(PreparedDBCollector):
         self.csrf = info['csrf']
         fields={}
         if self.config.incremental_base:
-            from .date_incremental import REVISION
+            from .date_incremental import REVISION, APPROVAL_REVISION
             if self.config.mail and info.get('mail_date_revision')!=REVISION:
                 raise CollectionError('백업 시각 이후 메일만 받아 기존 폴더에 반영하려면 서버 공용 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
             if self.baseline is None:
                 self.prepare_baseline()
+            if self.config.approvals:
+                if info.get('approval_date_revision')!=APPROVAL_REVISION:
+                    raise CollectionError('마지막 결재 백업 시각 이후 기안 문서만 추가하려면 서버 공용 tools를 최신 버전으로 설치하세요.')
+                if self.baseline.approval_since is not None:
+                    fields['approval_since']=str(self.baseline.approval_since)
+                    cutoff=datetime.fromtimestamp(self.baseline.approval_since,timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
+                    self.log('추가 결재 기안일 기준: '+cutoff+' · 이후 기안한 문서만 추출합니다. 이전 문서의 상태 변경은 다시 가져오지 않습니다.')
+                else:
+                    self.log('이전 백업에 결재 기준 시각이 없어 이번 결재는 전체 추출합니다. 완료 후 다음 추가 백업부터 기안일 기준을 적용합니다.')
             if self.config.mail:
                 if (not self.baseline.sources and not self.baseline.manifest.get('mail_checkpoint') and
                         not self.baseline.manifest['live_export'].get('mail')):
@@ -778,7 +788,7 @@ class DBCollector(PreparedDBCollector):
                 fields['mail_since']=str(self.baseline.since)
                 cutoff=datetime.fromtimestamp(self.baseline.since,timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
                 self.log('추가 메일 기준 시각: '+cutoff+' · 이후 저장·변경된 파일만 추출합니다.')
-            self.log('선택한 기존 백업 폴더에 추가 자료를 반영합니다. 결재는 현재 상태를 다시 조회합니다.')
+            self.log('선택한 기존 백업 폴더에 추가 자료를 반영합니다.')
         self.start_requested = True
         started = self.live_call('start', post=True, approvals='1' if self.config.approvals else '0',
                                  mail='1' if self.config.mail else '0',**fields)
@@ -833,9 +843,11 @@ class DBCollector(PreparedDBCollector):
             live.get('mail')!=self.config.mail):
             raise CollectionError('이번 요청의 DB·MBOX 선택과 추출 결과가 일치하지 않습니다.')
         if self.baseline:
+            if self.config.approvals:
+                self.baseline.validate_approval_delta(manifest)
             if self.config.mail:
                 self.baseline.validate_delta(destination)
-        elif manifest.get('incremental') or manifest.get('mail_delta'):
+        elif manifest.get('incremental') or manifest.get('mail_delta') or manifest.get('approval_delta'):
             raise CollectionError('전체 백업 요청에 변경분 보관본이 반환되어 중단했습니다.')
 
     def finalize_download(self, root, archive, destination):

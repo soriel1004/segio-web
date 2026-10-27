@@ -4,9 +4,32 @@
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
+<a id="approval-date-install"></a>
+
+## v0.6.7 기안일 기준 새 결재 추출
+
+Windows v0.6.7의 추가 백업은 마지막 **결재** 백업 기준 시각 이후 기안한 새 문서만 서버에서 추출합니다. 원본 `approval_document.wdate`와 과거 문서의 기안일을 사용하고, 해당 문서에 연결된 결재선·첨부·이력을 함께 반환합니다. 기준 시각 전에 기안한 문서의 이후 완료·반려·본문·첨부 변경은 다시 가져오지 않습니다. 기안일 미확인 문서는 날짜 제한 추출에서 제외하며 전체 백업에서는 유지합니다. 별도 SSH 프로그램은 기존처럼 전체 결재를 추출합니다.
+
+Windows 프로그램과 서버 공용 tools를 모두 갱신합니다. 진행 중인 두 프로그램의 백업이 끝난 뒤 root SSH에서 아래 명령을 실행하세요. 그룹웨어 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.6.7.zip \
+  -o "$TOOLS_DIR/segio-web-0.6.7.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.6.7.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.6.7/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+출력에서 **`Date-selected approval revision: draft-time-merge-1.`**과 기존 `Date-selected mail revision: file-time-merge-1.`을 확인하세요. 인증·CSRF 검증 뒤 `approval_since`에 서버 기준 Unix 초만 받으며 다른 직원 ID·경로·명령을 받지 않습니다. 음수·0·소수·미래 기준 시각과 결재 미선택 시 기준 전달을 거부합니다. 개인 관계 범위를 유지한 읽기 전용 DB 스냅샷에서 기안일 조건을 적용합니다. 결재/메일 추출 시작 시각은 각각 반환하며 Windows가 요청 기준과 응답 규약·기준 시각을 검증한 뒤 기존 백업에 합칩니다.
+
+메일만 백업할 때 결재 기준을, 결재만 백업할 때 메일 기준을 앞당기지 않습니다. 예전 전체 백업의 서버 요청 시각도 기준으로 사용할 수 있습니다. 예전 메일 전용 백업처럼 결재 기준을 확인할 수 없으면 첫 결재를 전체 조회해 기준을 설정하고 로그에 안내합니다. 원본 DB·메일·설정·인증 방법을 변경하지 않으며 예전 Windows 클라이언트와 SSH 직접 추출의 기본 동작은 호환됩니다.
+
 ## v0.6.2 백업 기준 시각 이후 메일 추출
 
-Windows 0.6.2의 추가 백업에는 `file-time-merge-1`이 필요합니다. 이전 `mail_baseline` 해시 비교 요청도 호환되며 SSH 프로그램의 통신 규약·기존 동작은 유지합니다. 두 프로그램의 진행 중인 백업이 끝난 뒤 root SSH에서 설치하세요. 재부팅은 필요하지 않습니다.
+Windows 0.6.2의 추가 백업에는 `file-time-merge-1`이 필요합니다. 아래 결재 전체 조회 설명은 Windows 0.6.2~0.6.6에 해당하며 0.6.7은 위의 기안일 기준을 사용합니다. 이전 `mail_baseline` 해시 비교 요청도 호환되며 SSH 프로그램의 통신 규약·기존 동작은 유지합니다. 두 프로그램의 진행 중인 백업이 끝난 뒤 root SSH에서 설치하세요. 재부팅은 필요하지 않습니다.
 
 ```bash
 TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&

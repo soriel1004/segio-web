@@ -18,7 +18,7 @@ import zipfile
 import zlib
 from optparse import OptionParser
 
-from export_approval_db import run_export
+from export_approval_db import run_export, approval_cutoff, APPROVAL_DATE_REVISION, APPROVAL_DATE_PROTOCOL
 from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
@@ -37,7 +37,8 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
     'server_access_denied', 'server_file_missing', 'export_failed',
     'secure_random_unavailable', 'csrf_required', 'read_only', 'unexpected_parameter',
-    'empty_selection', 'invalid_baseline', 'job_storage_failed', 'export_process_unavailable',
+    'empty_selection', 'invalid_baseline', 'invalid_mail_since', 'invalid_approval_since',
+    'job_storage_failed', 'export_process_unavailable',
     'export_already_running', 'export_busy', 'mail_path_unconfigured'))
 
 
@@ -439,15 +440,24 @@ def run_job(config_path, job_id):
         checkpoint()
         baseline=parse_mail_baseline(request.get('mail_baseline'))
         since=parse_mail_since(request.get('mail_since'))
+        approval_since=approval_cutoff(request.get('approval_since'))
+        if approval_since is not None and request.get('approvals') is not True:
+            raise SafeError('invalid_approval_since')
         if baseline is not None and since is not None:
             raise SafeError('invalid_mail_since')
         if request.get('approvals') is True:
             stage = 'database'
             status('running', 'database')
+            approval_checkpoint = int(time.time())
             folder, intermediate = run_export(config['db_config'], user, work, cell=config['cell'],
-                                               binary=config.get('psql', '/usr/bin/psql'), live_scope=True,checkpoint=checkpoint)
+                                               binary=config.get('psql', '/usr/bin/psql'), live_scope=True,checkpoint=checkpoint,
+                                               approval_since=approval_since)
             os.unlink(intermediate)
             manifest = read_json(os.path.join(folder, 'manifest.json'), 16 * 1024 * 1024)
+            manifest['approval_checkpoint'] = approval_checkpoint
+            if approval_since is not None:
+                manifest['approval_delta'] = {'protocol':APPROVAL_DATE_PROTOCOL, 'revision':APPROVAL_DATE_REVISION,
+                                              'since':approval_since, 'basis':'document_wdate'}
         else:
             folder = os.path.join(work, 'bundle')
             os.mkdir(folder, 0o700)

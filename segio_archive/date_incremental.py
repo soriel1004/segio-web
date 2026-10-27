@@ -19,6 +19,8 @@ from .web import CollectionError
 
 PROTOCOL = 'segio-mail-date/1'
 REVISION = 'file-time-merge-1'
+APPROVAL_REVISION = 'draft-time-merge-1'
+APPROVAL_PROTOCOL = 'segio-approval-date/1'
 
 
 def save(path, value):
@@ -75,6 +77,17 @@ class DateBaseline(Baseline):
                 raise ValueError()
             if (root/'mail/sources.json').exists() or 'mail/sources.json' in self.manifest['files']:
                 super().__init__(root, user, checkpoint)
+            # Mail-only updates must not advance the approval snapshot time.
+            # Legacy mail-only results lack that time: establish it with a
+            # full approval export once instead of guessing a newer cutoff.
+            approval_time=self.manifest.get('approval_checkpoint')
+            if approval_time is None and self.manifest['live_export'].get('approvals') is True:
+                approval_time=self.manifest['live_export'].get('requested_at')
+            self.approval_since=None
+            if approval_time is not None:
+                if type(approval_time) is not int or approval_time<1:
+                    raise ValueError()
+                self.approval_since=approval_time
             value = self.manifest.get('mail_checkpoint', self.manifest['live_export'].get('requested_at'))
             if value is None:
                 value = datetime.fromisoformat(self.manifest['finished_at'].replace('Z', '+00:00')).timestamp()
@@ -150,6 +163,19 @@ class DateBaseline(Baseline):
             paths.add(path)
         if paths != {name for name in manifest['files'] if name.startswith('mail/raw/')}:
             raise CollectionError('추가 메일 파일과 원본 목록이 일치하지 않습니다.')
+
+    def validate_approval_delta(self, manifest):
+        checkpoint=manifest.get('approval_checkpoint')
+        if type(checkpoint) is not int or checkpoint<1:
+            raise CollectionError('서버가 결재 백업 기준 시각을 반환하지 않았습니다. 서버 공용 tools를 갱신하세요.')
+        delta=manifest.get('approval_delta')
+        if self.approval_since is None:
+            if delta:
+                raise CollectionError('첫 결재 백업에 날짜 제한 결과가 반환되어 중단했습니다.')
+        elif (not isinstance(delta,dict) or delta.get('protocol')!=APPROVAL_PROTOCOL or
+                delta.get('revision')!=APPROVAL_REVISION or delta.get('basis')!='document_wdate' or
+                delta.get('since')!=self.approval_since or checkpoint<self.approval_since):
+            raise CollectionError('서버가 요청한 기안일 기준과 일치하는 추가 결재를 반환하지 않았습니다. 서버 공용 tools를 갱신하세요.')
 
     def prepare(self, destination, checkpoint, report, log, *, approvals=True, mail=True):
         """Keep old raw/pages immutable; only private metadata is rewritten."""
@@ -251,6 +277,8 @@ class DateBaseline(Baseline):
             for key in ('snapshot_rows','document_presentation'):
                 if key in self.manifest:
                     current[key] = self.manifest[key]
+            if self.approval_since is not None:
+                current['approval_checkpoint']=self.approval_since
         if not mail and 'mail_checkpoint' in self.manifest:
             current['mail_checkpoint'] = self.manifest['mail_checkpoint']
         for key in ('approval_status_map',):
@@ -260,6 +288,9 @@ class DateBaseline(Baseline):
         current['last_incremental'] = {'protocol':PROTOCOL, 'since':self.since, 'merged':True,
                                        'added_mail_files':added, 'changed_mail_files':replaced,
                                        'retained_mail_files':len(sources)-len(changed)}
+        if approvals:
+            current['last_incremental']['approval_since']=self.approval_since
+            current['last_incremental']['received_approval_documents']=len(new_catalog['items'])
         save(destination/'manifest.json', current)
         log('기존 메일 원본을 유지하고 새 파일 %d개·변경 파일 %d개만 반영합니다.' % (added,replaced))
         return changed

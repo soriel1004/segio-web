@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -824,6 +825,56 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                     if name.startswith(('mail/raw/','mail/offline/')):
                         self.assertEqual((base/name).read_bytes(),body)
         finally:mail.unlink(missing_ok=True)
+
+    def test_incremental_login_requests_new_drafts_and_retains_previously_saved_old_approvals(self):
+        database=self.live_root/'database.json'
+        original=database.read_bytes()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee',Path(tmp),mail=False,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                base=DBCollector(config).run(PASSWORD)
+                before=json.loads((base/'manifest.json').read_bytes())
+                cutoff=before['approval_checkpoint']
+                saved=(base/'documents/1/database.json').read_bytes()
+                records=json.loads(original)
+                records['employee']={'documents':[
+                    {'no':'1','title':'Old draft changed later','wdate':cutoff-100,'cdate':cutoff+1},
+                    {'no':'2','title':'New PHP draft only','wdate':cutoff}]}
+                database.write_text(json.dumps(records))
+                config.incremental_base=base
+                client=DBCollector(config)
+                result=client.run(PASSWORD)
+                self.assertEqual(result,base)
+                after=json.loads((base/'manifest.json').read_bytes())
+                self.assertEqual(after['approval_delta']['since'],cutoff)
+                self.assertEqual(after['approval_delta']['basis'],'document_wdate')
+                self.assertEqual((base/'documents/1/database.json').read_bytes(),saved)
+                self.assertEqual(after['counts']['approval'],2)
+                self.assertTrue((base/'documents/2/document.html').is_file())
+                self.assertTrue(client.cleanup_confirmed)
+                self.assertTrue(verify_archive(base)['ok'])
+        finally:database.write_bytes(original)
+
+    def test_php_rejects_invalid_draft_cutoffs_before_starting_a_job(self):
+        import urllib.error
+        from urllib.parse import urlencode
+        opener=self.logged_in()
+        endpoint=self.url+'/segio/archive/live.php'
+        with opener.open(endpoint+'?action=info') as response:info=json.load(response)
+        self.assertEqual(info['approval_date_revision'],'draft-time-merge-1')
+        before={path.name for path in (self.live_root/'jobs').iterdir()}
+        for value,approvals in (('0','1'),('-1','1'),('1.5','1'),('1 OR 1=1','1'),
+                                ('9'*13,'1'),(str(int(time.time())+1000),'1'),('1','0')):
+            with self.subTest(value=value,approvals=approvals):
+                fields={'csrf':info['csrf'],'approvals':approvals,'mail':'1','approval_since':value}
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    opener.open(endpoint+'?action=start',data=urlencode(fields).encode())
+                self.assertEqual(caught.exception.code,400)
+                self.assertEqual(json.loads(caught.exception.read())['error'],'invalid_approval_since')
+                caught.exception.close()
+        self.assertEqual({path.name for path in (self.live_root/'jobs').iterdir()},before)
 
     def test_incremental_cancel_during_staging_removes_only_new_work_and_preserves_existing_backup(self):
         from segio_archive.web import Cancelled

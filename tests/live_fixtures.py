@@ -9,18 +9,29 @@ def synthetic_export(config, username, output, **kwargs):
     assert kwargs.get('live_scope') is True
     records = json.loads(Path(config).read_text(encoding='utf-8'))
     record = records[username]
+    documents = record.get('documents',[record])
+    since = kwargs.get('approval_since')
+    if since is not None:
+        documents = [item for item in documents if str(item.get('wdate','')).isascii() and
+                     str(item.get('wdate','')).isdigit() and len(str(item.get('wdate','')))<=12 and
+                     int(item['wdate'])>=since]
     folder = Path(output)/'database'
     folder.mkdir()
-    data = {'index.html':b'<p>DB import pending</p>',
-            'documents/1/document.html':('<meta charset="utf-8"><p>'+record['title']+'</p>').encode(),
-            'documents/1/database.json':json.dumps(record,ensure_ascii=False).encode(),
-            'catalog.json':json.dumps({'items':[{'id':'1','title':record['title'],'source':'active',
-                             'path':'documents/1/document.html','json':'documents/1/database.json',
-                             'search':record['title'],'attachments':[]}]},ensure_ascii=False).encode()}
+    data = {'index.html':b'<p>DB import pending</p>'}
+    items = []
+    for document in documents:
+        identity=str(document.get('no','1'))
+        html='documents/'+identity+'/document.html'
+        raw='documents/'+identity+'/database.json'
+        data[html]=('<meta charset="utf-8"><p>'+document['title']+'</p>').encode()
+        data[raw]=json.dumps(document,ensure_ascii=False).encode()
+        items.append({'id':identity,'title':document['title'],'source':'active',
+                      'path':html,'json':raw,'search':document['title'],'attachments':[]})
+    data['catalog.json']=json.dumps({'items':items},ensure_ascii=False).encode()
     manifest={'format':'segio-db-html/1','user':username,'server':'cell_000',
               'state':'collected_with_warnings','account_deletion_verified':False,
-              'counts':{'approval':1},'coverage':[],'warnings':['삭제 영향 미검증'],
-              'snapshot_rows':{'approval_document':1},
+              'counts':{'approval':len(items)},'coverage':[],'warnings':['삭제 영향 미검증'],
+              'snapshot_rows':{'approval_document':len(items)},
               'files':{name:{'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest()} for name,body in data.items()}}
     for name,body in data.items():
         target=folder/name

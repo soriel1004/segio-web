@@ -107,7 +107,32 @@ def member_sql(column, uid, structured=False):
             "AS tok(value) WHERE %sbtrim(split_part(tok.value,'@@',1))=%s)" % (column, condition, uid))
 
 
-def selection_sql(username, live_scope=False):
+APPROVAL_DATE_REVISION = 'draft-time-merge-1'
+APPROVAL_DATE_PROTOCOL = 'segio-approval-date/1'
+
+
+def approval_cutoff(raw):
+    if raw is None:
+        return None
+    import time
+    if isinstance(raw, bool) or not re.match(r'\A[0-9]{1,12}\Z', text(raw)):
+        raise SafeError('Invalid approval backup time.', 'invalid_approval_since')
+    value = int(raw)
+    if value < 1 or value > time.time() + 300:
+        raise SafeError('Invalid approval backup time.', 'invalid_approval_since')
+    return value
+
+
+def draft_since_sql(alias, since):
+    # Production wdate is Unix seconds. Cast only after checking its text;
+    # missing/unknown dates are excluded, never replaced by completion dates.
+    column = 'btrim(%s.wdate::text)' % alias
+    return ("CASE WHEN %s ~ '^[0-9]{1,12}$' THEN %s::numeric >= %d ELSE false END" %
+            (column, column, since))
+
+
+def selection_sql(username, live_scope=False, approval_since=None):
+    approval_since = approval_cutoff(approval_since)
     uid = "convert_from(decode('%s','hex'),'UTF8')" % binascii.hexlify(username.encode("utf-8")).decode("ascii")
     choices = []
     for table in ("approval_document", "approval_document_backup"):
@@ -123,12 +148,13 @@ def selection_sql(username, live_scope=False):
                 rules.append("EXISTS (SELECT 1 FROM public.approval_doc_backup%s b WHERE b.p_no=d.no AND b.uid=%s)" % (suffix, uid))
         if not live_scope:
             rules.append("EXISTS (SELECT 1 FROM public.approval_favorite f WHERE f.doc_no=d.no AND f.uid=%s)" % uid)
-        choices.append("SELECT d.no FROM public.%s d WHERE (%s)" % (table, " OR ".join(rules)))
+        date_rule = (' AND ('+draft_since_sql('d',approval_since)+')') if approval_since is not None else ''
+        choices.append("SELECT d.no FROM public.%s d WHERE (%s)%s" % (table, " OR ".join(rules), date_rule))
     return " UNION ".join(choices), uid
 
 
-def make_queries(username, model, live_scope=False):
-    ids, uid = selection_sql(username, live_scope)
+def make_queries(username, model, live_scope=False, approval_since=None):
+    ids, uid = selection_sql(username, live_scope, approval_since)
     queries = {}
     for table in model:
         if table in ("approval_document", "approval_document_backup"):
@@ -297,10 +323,10 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
             os.unlink(passfile)
 
 
-def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None):
+def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None, approval_since=None):
     with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
         model = json.loads(stream.read().decode("utf-8"))
-    queries = make_queries(username, model, live_scope)
+    queries = make_queries(username, model, live_scope, approval_since)
     sql = ["\\set ON_ERROR_STOP on", "\\set VERBOSITY verbose",
            "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;",
            "SET LOCAL statement_timeout=60000;", "SET LOCAL client_encoding='UTF8';"]
@@ -690,8 +716,9 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None):
     notify = progress or (lambda message: None)
+    approval_since = approval_cutoff(approval_since)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
         raise SafeError("Use an exact employee ID containing letters, digits, _, ., @ or -.")
     cell = os.path.realpath(cell or os.path.join(os.path.dirname(config), os.pardir))
@@ -705,7 +732,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     success = False
     try:
         notify("Reading approval records in one read-only DB snapshot...")
-        rows, counts = query_database(config, username, work, binary, live_scope,checkpoint)
+        rows, counts = query_database(config, username, work, binary, live_scope,checkpoint,approval_since=approval_since)
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
         shutil.rmtree(work)
@@ -726,7 +753,9 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         if live_scope:
             warnings[1] = u"로그인 ID의 기안·결재선·대결·참조·개인 수신 관계로 연결되는 DB 기록과 이력을 추출했습니다. 댓글·즐겨찾기만으로 연결된 문서는 제외합니다. 관리자 설치 시 승인한 개인 기록 보관 범위이며 SEGIO 화면별 권한과 동일하다고 검증되지 않았습니다."
             warnings[3] = u"approval_ext_info/report/work 계열의 별도 업무·확장 기록은 이번 DB 수집 범위에 포함하지 않았습니다. 메일 선택 결과는 manifest.json의 mail 항목을 확인하세요."
-        if not items:
+        if approval_since is not None:
+            warnings.append(u'추가 결재는 마지막 결재 백업 기준 시각 이후 기안한 문서만 포함합니다. 이전 기안 문서의 상태·본문·첨부 변경과 기안일 미확인 문서는 다시 추출하지 않습니다.')
+        if not items and approval_since is None:
             warnings.append(u"개인 관계로 확인된 문서가 0개입니다. 실제 결재함과 대조하기 전에는 자료가 없다고 판단할 수 없습니다.")
         manifest = {"format": "segio-db-html/1", "server": "cell_000", "user": username,
                     "state": "collected_with_warnings", "account_deletion_verified": False,
