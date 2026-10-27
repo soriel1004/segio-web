@@ -2,6 +2,7 @@
 """Private administrator SSH helper. Python 2.6+. Never modifies source records."""
 from __future__ import print_function
 import binascii
+import errno
 import hashlib
 import json
 import os
@@ -26,7 +27,7 @@ def source_hex(path):
     return binascii.hexlify(path).decode('ascii')
 
 
-def hash_file(path, expected=None):
+def hash_file(path, expected=None, progress=lambda count: None):
     descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     digest, size = hashlib.sha256(), 0
     with os.fdopen(descriptor, 'rb') as stream:
@@ -34,14 +35,71 @@ def hash_file(path, expected=None):
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or (expected and before != expected):
             raise SafeError('mail_changed_retry')
         while True:
-            block = stream.read(1024 * 1024)
+            block = stream.read(min(1024 * 1024, before[2]-size+1))
             if not block:
                 break
             digest.update(block)
             size += len(block)
-    if expected and (fingerprint(path) != expected or size != expected[2]):
+            if size>before[2]:
+                raise SafeError('mail_changed_retry')
+            progress(size)
+    if fingerprint(path) != before or size != before[2]:
         raise SafeError('mail_changed_retry')
     return {'bytes': size, 'sha256': digest.hexdigest()}
+
+
+def mail_snapshot(request, status):
+    """Retry changing inventories without copying raw MBOX or rehashing stable files."""
+    cache={}
+    for attempt in range(1,4):
+        try:
+            mailbox_root=mail_path(request['mail_template'],request['user'])
+            before=inventory(mailbox_root)
+            sources,transfers,identities=[],[],[]
+            completed,total=0,sum(item[2][2] for item in before)
+            last_report=[0]
+            def report(count,force=False):
+                now=time.time()
+                if force or now-last_report[0]>=1:
+                    status('running',attempt=attempt,files_done=len(sources),files_total=len(before),
+                           completed_bytes=completed+count,total_bytes=total)
+                    last_report[0]=now
+            report(0,True)
+            for number,(name,path,identity) in enumerate(before):
+                cached=cache.get(name)
+                if cached and cached[0]==identity:
+                    details,kind=cached[1:]
+                else:
+                    descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+                    with os.fdopen(descriptor,'rb') as stream:
+                        prefix=stream.read(8192)
+                    is_mbox=not prefix or prefix.startswith(b'From ')
+                    is_eml=(not is_mbox and re.match(b'[A-Za-z][A-Za-z0-9-]*:',prefix) and
+                        re.search(b'(?im)^(subject|from|to|date|received|delivered-to|mime-version):',prefix))
+                    kind='mbox' if is_mbox else 'rfc822' if is_eml else 'unrecognized'
+                    details=hash_file(path,identity,report)
+                    cache[name]=(identity,details,kind)
+                relative='mail/raw/%06d.%s' % (number,'mbox' if kind=='mbox' else 'eml' if kind=='rfc822' else 'bin')
+                raw_name=binascii.unhexlify(source_hex(name))
+                try:
+                    display=raw_name.decode('utf-8')
+                except UnicodeError:
+                    display=raw_name.decode('cp949','replace')
+                source=dict(details,path=relative,name=display,name_bytes_hex=source_hex(name),format=kind)
+                sources.append(source)
+                transfers.append(dict(details,path=relative,source_hex=source_hex(path)))
+                identities.append({'name_hex':source['name_bytes_hex'],'identity':list(identity)})
+                completed+=details['bytes']
+                report(0,True)
+            if inventory(mailbox_root)==before:
+                return sources,transfers,identities
+        except SafeError as exc:
+            if str(exc)!='mail_changed_retry' and exc.code!='mail_changed_retry':
+                raise
+        except (IOError,OSError) as exc:
+            if exc.errno!=errno.ENOENT:
+                raise
+    raise SafeError('mail_changed_retry')
 
 
 def private_root(root):
@@ -92,33 +150,9 @@ def prepare(root):
         if request['mail']:
             stage = 'mail'
             status('running', files_done=0)
-            mailbox_root = mail_path(request['mail_template'], user)
-            before = inventory(mailbox_root)
-            identities = []
-            for number, (name, path, identity) in enumerate(before):
-                descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-                with os.fdopen(descriptor, 'rb') as stream:
-                    prefix = stream.read(8192)
-                is_mbox = not prefix or prefix.startswith(b'From ')
-                is_eml = (not is_mbox and re.match(b'[A-Za-z][A-Za-z0-9-]*:', prefix) and
-                    re.search(b'(?im)^(subject|from|to|date|received|delivered-to|mime-version):', prefix))
-                kind = 'mbox' if is_mbox else 'rfc822' if is_eml else 'unrecognized'
-                relative = 'mail/raw/%06d.%s' % (number, 'mbox' if is_mbox else 'eml' if is_eml else 'bin')
-                details = hash_file(path, identity)
-                raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape')
-                try:
-                    display = raw_name.decode('utf-8')
-                except UnicodeError:
-                    display = raw_name.decode('cp949', 'replace')
-                source = dict(details, path=relative, name=display,
-                              name_bytes_hex=binascii.hexlify(raw_name).decode('ascii'), format=kind)
-                sources.append(source)
-                manifest['files'][relative] = details
-                transfers.append(dict(details, path=relative, source_hex=source_hex(path)))
-                identities.append({'name_hex': source['name_bytes_hex'], 'identity': list(identity)})
-                status('running', files_done=number + 1, files_total=len(before))
-            if inventory(mailbox_root) != before:
-                raise SafeError('mail_changed_retry')
+            sources,transfers,identities=mail_snapshot(request,status)
+            for source in sources:
+                manifest['files'][source['path']]=dict((key,source[key]) for key in ('bytes','sha256'))
             write_json(os.path.join(root, 'mail-check.json'), identities)
             mail_dir = os.path.join(folder, 'mail')
             os.mkdir(mail_dir, 0o700)

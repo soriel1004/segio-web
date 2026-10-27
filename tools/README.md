@@ -1,8 +1,14 @@
 # 두 프로그램 공용 tools
 
-**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio-web/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
+**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
 
-이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.4)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
+이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.10)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
+
+## SSH v0.4.5 원본 검사 재시도·진행률
+
+SSH 작업기는 MBOX를 복사하지 않고 원본을 해시하며 용량·파일 수를 보고합니다. 목록이 바뀌면 최대 3회 대조하고 그대로인 파일의 해시를 재사용합니다. SSH 파일 업로드 목록·통신 규약은 유지하므로 기존 SSH 클라이언트와도 호환됩니다. 최신 Windows 프로그램은 자체 `tools`를 비공개 작업 폴더에 올리므로 SSH 사용을 위해 웹 연결 기능을 설치할 필요가 없습니다.
+
+아래 v0.6.x 기능은 개인 로그인 프로그램의 웹 추출 요청용입니다. SSH v0.4.5는 전체 메일과 동일 작업 이어받기를 지원합니다.
 
 <a id="approval-date-install"></a>
 
