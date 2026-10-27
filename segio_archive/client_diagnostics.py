@@ -15,7 +15,8 @@ MEDIA = {'application/json','text/html','text/plain','application/octet-stream',
 BODY_KINDS = {'empty','login_form','php_source','php_error','html','json_like','other'}
 PHASES = {'시작','브라우저 시작','SEGIO 로그인','서버 연결 기능 확인','서버 로그인 확인',
           '서버 추출 요청','서버 추출 상태 확인','서버 연결','다운로드 저장 폴더 준비',
-          '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성'}
+          '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성',
+          '이전 백업 확인','기존 백업 반영 준비'}
 ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARGE',
                'service_not_configured','job_not_found','BRIDGE_STATUS_NOT_FOUND','invalid_baseline',
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
@@ -24,7 +25,7 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'FILE_ACCESS_DENIED','FILE_IO_ERROR','FILE_SECURITY_BLOCKED','DISK_FULL','FILE_TOO_LARGE',
                'UNEXPECTED_PROCESSING_ERROR','INVALID_JSON','LOCAL_INDEX_PENDING',
                'LOCAL_DATABASE_ERROR','LOCAL_TEXT_ENCODING_ERROR','MEMORY_LIMIT','MAIL_FORMAT_ERROR',
-               'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR',
+               'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR','BASELINE_FILE_MISSING',
                'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_CLOSED',
                'ERR_NAME_NOT_RESOLVED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID',
                'ERR_SSL_PROTOCOL_ERROR','ERR_SSL_VERSION_OR_CIPHER_MISMATCH','ERR_FAILED',
@@ -167,6 +168,10 @@ def write_failure(output, exception, phase):
             'errno':data.get('errno') if type(data.get('errno')) is int else None,
             'winerror':data.get('winerror') if type(data.get('winerror')) is int else None,
             'operation':data.get('operation') if data.get('operation') in ('replace','file_io') else 'file_io'}
+    data = getattr(exception,'baseline_diagnostic',None)
+    if isinstance(data,dict) and data.get('required_file') in (
+            'manifest','catalog','search_database','mail_sources','mail_raw','backup_asset'):
+        record['baseline'] = {'required_file':data['required_file']}
     output = Path(output).expanduser().resolve()
     output.mkdir(parents=True,exist_ok=True)
     destination = output/'last-client-failure.json'
@@ -179,3 +184,10 @@ def write_failure(output, exception, phase):
         if os.path.exists(temporary):
             os.unlink(temporary)
     return destination
+
+
+def failure_notice(output, exception, phase):
+    try:
+        return '\n\n오류 기록: '+str(write_failure(output,exception,phase))
+    except OSError:
+        return '\n\n지정한 Windows 저장 폴더에 오류 기록을 저장하지 못했습니다. 폴더 접근 권한과 여유 공간을 확인하세요.'

@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from .archive import atomic_write
+from .backup_folders import require_backup_file
 from .compact_mail import digest_file
 from .storage import require_space
 from .web import CollectionError
@@ -18,7 +19,7 @@ class Baseline:
         self.entries={}
         checkpoint()
         try:
-            path=self.root/'manifest.json'
+            path=require_backup_file(self.root,'manifest.json')
             if path.is_symlink() or path.stat().st_size>16*1024*1024:
                 raise ValueError()
             manifest=json.loads(path.read_bytes())
@@ -29,6 +30,7 @@ class Baseline:
                 raise ValueError()
             self.finished_at=manifest.get('finished_at','')
             source_path=self.root/'mail/sources.json'
+            require_backup_file(self.root,'mail/sources.json')
             expected=manifest['files'].get('mail/sources.json')
             if not expected or source_path.is_symlink() or source_path.stat().st_size>16*1024*1024:
                 raise ValueError()
@@ -48,6 +50,7 @@ class Baseline:
                         not re.fullmatch(r'[a-f0-9]{64}',info['sha256']) or manifest['files'].get(relative)!=info):
                     raise ValueError()
                 path=self.raw_path(relative)
+                require_backup_file(self.root,relative)
                 if path.stat().st_size!=info['bytes']:
                     raise ValueError()
                 self.entries[name]=dict(info,path=relative)

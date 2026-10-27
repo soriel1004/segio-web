@@ -92,6 +92,42 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertEqual(original_page,(page.stat().st_ino,page.stat().st_mtime_ns,page.read_bytes()))
         self.assertEqual(search(result,'Reply to old',kind='mail')['items'][0]['date_raw'],'Mon, 01 Jan 1990 10:00:00 +0900')
 
+    def test_preflight_keeps_selected_output_and_names_missing_required_files_before_login(self):
+        from segio_archive.backup_folders import MissingBackupFile
+        from segio_archive.db_client import DBCollector
+        from segio_archive.web import Config
+        output=self.root/'Windows selected'
+        config=Config('https://example.invalid/','employee',output,incremental_base=self.old)
+        client=DBCollector(config)
+        client.prepare_baseline()
+        self.assertEqual(config.output,output)
+        self.assertEqual(client.working_output,self.old.parent)
+        self.assertEqual(client.diagnostic_output,output)
+        self.assertFalse(output.exists())
+        raw=self.base.sources[0]['path']
+        for name,key in (('manifest.json','manifest'),('catalog.json','catalog'),
+                         ('catalog.sqlite3','search_database'),('mail/sources.json','mail_sources'),(raw,'mail_raw')):
+            with self.subTest(missing=name):
+                path=self.old/name
+                payload=path.read_bytes()
+                path.unlink()
+                before=self.snapshot()
+                try:
+                    client=DBCollector(config)
+                    with patch('segio_archive.db_client.launch_browser') as browser:
+                        with self.assertRaisesRegex(MissingBackupFile,name):client.run('PRIVATE_PASSWORD')
+                    browser.assert_not_called()
+                    self.assertFalse(client.start_requested)
+                    self.assertEqual(before,self.snapshot())
+                    record=json.loads((output/'last-client-failure.json').read_bytes())
+                    self.assertEqual(record['baseline'],{'required_file':key})
+                    self.assertEqual(record['error'],'BASELINE_FILE_MISSING')
+                    self.assertEqual(record['phase'],'이전 백업 확인')
+                    self.assertNotIn('PRIVATE_PASSWORD',json.dumps(record))
+                finally:path.write_bytes(payload)
+        (output/'last-client-failure.json').unlink()
+        self.assertIsInstance(DateBaseline(self.old,'employee'),DateBaseline)
+
     def test_no_new_mail_does_not_read_or_render_old_payloads(self):
         from segio_archive import portable_mail
         target = self.export(2,self.base)

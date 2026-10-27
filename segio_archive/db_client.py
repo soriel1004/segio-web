@@ -245,6 +245,8 @@ class PreparedDBCollector(Collector):
         super().__init__(config, log)
         self.phase = '시작'
         self.failure_path = None
+        self.diagnostic_output = config.output.expanduser().resolve()
+        self.working_output = self.diagnostic_output
         self.progress = ProgressReporter(config.progress)
         self.user_agent = None
         self.owned_folders = []
@@ -304,19 +306,22 @@ class PreparedDBCollector(Collector):
     def reset_remote_job(self):
         pass
 
+    def prepare_baseline(self):
+        pass
+
     def publish_result(self, destination):
         return destination
 
     def record_failure(self, exception):
         try:
-            self.failure_path = write_failure(self.config.output,exception,self.phase)
+            self.failure_path = write_failure(self.diagnostic_output,exception,self.phase)
             self.log('오류 기록: '+str(self.failure_path))
         except OSError:
             self.log('오류 기록을 저장하지 못했습니다. 저장 폴더 권한과 공간을 확인하세요.')
 
     def receive(self, record):
         self.phase = '다운로드 저장 폴더 준비'
-        output = self.config.output.expanduser().resolve()
+        output = self.working_output
         output.mkdir(parents=True, exist_ok=True)
         if record['bytes'] + 64*1024*1024 > shutil.disk_usage(output).free:
             raise CollectionError("ZIP을 저장할 공간이 부족합니다.")
@@ -414,9 +419,11 @@ class PreparedDBCollector(Collector):
         self.local_discard_confirmed=False
         self.commit_finished=False
         self.backup_day=backup_date()
+        self.working_output=self.diagnostic_output
         self.reset_remote_job()
         try:
             self.checkpoint()
+            self.prepare_baseline()
             with sync_playwright() as p:
                 self.phase = '브라우저 시작'
                 self.progress('login')
@@ -497,7 +504,7 @@ class PreparedDBCollector(Collector):
             return
         self.local_discard_confirmed = True
         self.progress('cancel_cleanup')
-        output=self.config.output.expanduser().resolve()
+        output=self.working_output
         for path in self.owned_folders:
             try:
                 if path.parent.resolve()!=output or path.is_symlink():
@@ -527,6 +534,15 @@ class DBCollector(PreparedDBCollector):
         self.cleanup_error_code = None
         self.baseline = None
         self.start_requested = False
+
+    def prepare_baseline(self):
+        if not self.config.incremental_base:
+            return
+        from .date_incremental import DateBaseline
+        self.phase = '이전 백업 확인'
+        self.log('기존 백업의 완료 상태·백업 기준 시각·검색 DB를 확인하는 중')
+        self.baseline = DateBaseline(self.config.incremental_base,self.config.username,self.checkpoint)
+        self.working_output = self.baseline.root.parent
 
     def live_call(self, action, *, post=False, pending_login=False, timeout_ms=None, **fields):
         if action != 'cleanup':
@@ -750,12 +766,11 @@ class DBCollector(PreparedDBCollector):
         self.csrf = info['csrf']
         fields={}
         if self.config.incremental_base:
-            from .date_incremental import DateBaseline, REVISION
+            from .date_incremental import REVISION
             if self.config.mail and info.get('mail_date_revision')!=REVISION:
                 raise CollectionError('백업 시각 이후 메일만 받아 기존 폴더에 반영하려면 서버 공용 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
-            self.log('기존 백업의 완료 상태·백업 기준 시각·검색 DB를 확인하는 중')
-            self.baseline=DateBaseline(self.config.incremental_base,self.config.username,self.checkpoint)
-            self.config.output=self.baseline.root.parent
+            if self.baseline is None:
+                self.prepare_baseline()
             if self.config.mail:
                 if (not self.baseline.sources and not self.baseline.manifest.get('mail_checkpoint') and
                         not self.baseline.manifest['live_export'].get('mail')):

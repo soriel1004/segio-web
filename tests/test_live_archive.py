@@ -807,10 +807,14 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                 saved={str(p.relative_to(base)):p.read_bytes() for p in base.rglob('*') if p.is_file()}
                 mail.write_bytes(b'Subject: Native incremental old-dated arrival\nDate: Mon, 01 Jan 1990 10:00:00 +0900\n\nnew arrival')
                 config.incremental_base=base
+                selected_output=Path(tmp)/'Windows selected'
+                config.output=selected_output
                 client=DBCollector(config)
                 result=client.run(PASSWORD)
                 manifest=json.loads((result/'manifest.json').read_bytes())
                 self.assertEqual(result,base)
+                self.assertEqual(config.output,selected_output)
+                self.assertFalse((selected_output/'last-client-failure.json').exists())
                 self.assertEqual(manifest['last_incremental']['added_mail_files'],1)
                 self.assertTrue(verify_archive(result)['ok'])
                 from segio_archive.compact_mail import search

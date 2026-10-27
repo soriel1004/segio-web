@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .archive import atomic_write
+from .backup_folders import require_backup_file
 from .compact_mail import digest_file
 from .incremental import Baseline
 from .storage import require_space
@@ -56,14 +57,13 @@ def update_lock(root):
 class DateBaseline(Baseline):
     def __init__(self, root, user, checkpoint=lambda: None):
         root = Path(root).expanduser().resolve()
+        if not (root/'manifest.json').exists() and not self.journal(root).exists():
+            require_backup_file(root,'manifest.json')
         with update_lock(root):
             self.recover(root)
-        if (root/'mail/sources.json').exists():
-            super().__init__(root, user, checkpoint)
-        else:
-            self.root, self.entries = root, {}
+        self.root, self.entries = root, {}
         try:
-            path = root/'manifest.json'
+            path = require_backup_file(root,'manifest.json')
             if path.is_symlink() or path.stat().st_size > 16*1024*1024:
                 raise ValueError()
             self.original_manifest = path.read_bytes()
@@ -73,6 +73,8 @@ class DateBaseline(Baseline):
                     self.manifest.get('state') not in ('collected', 'collected_with_warnings') or
                     self.manifest.get('local_processing', {}).get('state') == 'pending'):
                 raise ValueError()
+            if (root/'mail/sources.json').exists() or 'mail/sources.json' in self.manifest['files']:
+                super().__init__(root, user, checkpoint)
             value = self.manifest.get('mail_checkpoint', self.manifest['live_export'].get('requested_at'))
             if value is None:
                 value = datetime.fromisoformat(self.manifest['finished_at'].replace('Z', '+00:00')).timestamp()
@@ -80,6 +82,7 @@ class DateBaseline(Baseline):
             if isinstance(value, bool) or self.since < 1:
                 raise ValueError()
             for name in ('catalog.sqlite3', 'catalog.json'):
+                require_backup_file(root,name)
                 if digest_file(self.raw_path(name), checkpoint) != self.manifest['files'][name]:
                     raise ValueError()
             self.sources = (json.loads((root/'mail/sources.json').read_bytes()).get('sources', [])

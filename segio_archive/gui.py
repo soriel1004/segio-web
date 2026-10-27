@@ -161,14 +161,61 @@ class App(tk.Tk):
 
     def backup_mode_changed(self):
         self.baseline_button.config(state='normal' if self.backup_mode.get()=='incremental' else 'disabled')
-        self.backup_hint.set('추가 백업은 선택한 기존 폴더에 반영합니다. 메일은 마지막 기준 시각 이후 파일만, 결재는 현재 상태를 갱신합니다.' if self.backup_mode.get()=='incremental' else '전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
+        self.backup_hint.set('기존 백업 폴더 또는 그 상위 저장 폴더를 선택하세요. manifest.json으로 백업을 확인하며, 오류 기록 파일은 필요하지 않습니다.' if self.backup_mode.get()=='incremental' else '전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
 
     def choose_baseline(self):
         if self.running:
             return
         value=filedialog.askdirectory(title='정상 완료한 이전 백업의 manifest.json이 있는 폴더',initialdir=self.folder.get())
         if value:
-            self.baseline_folder.set(value)
+            from .backup_folders import backup_candidates, MissingBackupFile
+            try:
+                path=Path(value).expanduser().resolve()
+                if not (path/'manifest.json').is_file():
+                    candidates=backup_candidates(path,self.user.get().strip())
+                    if not candidates:
+                        raise MissingBackupFile(path,'manifest.json')
+                    path=candidates[0] if len(candidates)==1 else self.choose_backup_candidate(candidates)
+                if path:
+                    self.baseline_folder.set(str(path))
+            except (CollectionError,OSError) as exc:
+                from .client_diagnostics import failure_notice
+                error=exc
+                if not isinstance(exc,CollectionError):
+                    from .db_client import processing_error
+                    error=processing_error(exc,'이전 백업 확인')
+                messagebox.showerror('기존 백업 폴더 확인',str(error)+failure_notice(Path(self.folder.get()),error,'이전 백업 확인'))
+
+    def choose_backup_candidate(self, candidates):
+        dialog=tk.Toplevel(self)
+        dialog.title('추가 자료를 반영할 기존 백업 선택')
+        dialog.transient(self)
+        dialog.geometry('760x330')
+        panel=ttk.Frame(dialog,padding=16)
+        panel.pack(fill='both',expand=True)
+        ttk.Label(panel,text='여러 백업이 있습니다. 추가 자료를 반영할 폴더를 선택하세요. 최신 완료 순으로 표시합니다.').pack(anchor='w',pady=(0,10))
+        listing=tk.Listbox(panel,exportselection=False)
+        listing.pack(fill='both',expand=True)
+        for path in candidates:
+            listing.insert('end',path.name)
+        listing.selection_set(0)
+        selected=[]
+        def confirm(*_):
+            indexes=listing.curselection()
+            if indexes:
+                selected.append(candidates[indexes[0]])
+                dialog.destroy()
+        buttons=ttk.Frame(panel)
+        buttons.pack(fill='x',pady=(12,0))
+        ttk.Button(buttons,text='선택',command=confirm).pack(side='right')
+        ttk.Button(buttons,text='취소',command=dialog.destroy).pack(side='right',padx=8)
+        listing.bind('<Double-Button-1>',confirm)
+        listing.bind('<Return>',confirm)
+        dialog.bind('<Escape>',lambda _:dialog.destroy())
+        dialog.grab_set()
+        listing.focus_set()
+        self.wait_window(dialog)
+        return selected[0] if selected else None
 
     def start(self):
         if self.running:
@@ -222,9 +269,16 @@ class App(tk.Tk):
             message = str(exc)
             if getattr(collector,'failure_path',None):
                 message += '\n\n오류 기록: '+str(collector.failure_path)
+            else:
+                from .client_diagnostics import failure_notice
+                message += failure_notice(config.output,exc,getattr(collector,'phase','시작'))
             self.events.put(("error", message))
         except Exception as exc:
-            self.events.put(("error", f"시작 실패 ({type(exc).__name__}). 저장 폴더 권한과 설치 상태를 확인하세요."))
+            from .client_diagnostics import failure_notice
+            from .db_client import processing_error
+            phase=getattr(collector,'phase','시작')
+            error=processing_error(exc,phase)
+            self.events.put(("error", str(error)+failure_notice(config.output,error,phase)))
         finally:
             password = ""
 
@@ -270,6 +324,7 @@ class App(tk.Tk):
                         messagebox.showerror('백업 갱신 확인',value)
                     elif event == "done":
                         self.last_archive = value
+                        self.baseline_folder.set(str(value))
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
                         self.finish_progress('백업 실패' if manifest['state']=='failed' else '백업 완료', manifest['state']!='failed')
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
@@ -393,7 +448,7 @@ class App(tk.Tk):
                         self.stop_button.config(state='normal')
                         self.begin_progress('기존 백업의 메일 본문·첨부 준비 중')
                         self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')
-                        threading.Thread(target=self.archive_worker,args=(path,),daemon=True).start()
+                        threading.Thread(target=self.archive_worker,args=(path,Path(self.folder.get()).expanduser().resolve()),daemon=True).start()
                         return
                     self.status.set('보관함 목록·검색 화면을 준비합니다. 서버에서 자료를 다시 받지 않습니다.')
                     self.update_idletasks()
@@ -409,7 +464,7 @@ class App(tk.Tk):
             else:
                 messagebox.showerror("보관함 확인", "선택한 폴더에 index.html이 없습니다.")
 
-    def archive_worker(self,path):
+    def archive_worker(self,path,diagnostic_output):
         from .portable_mail import prepare_archive
         from .web import Cancelled
         def checkpoint():
@@ -423,14 +478,10 @@ class App(tk.Tk):
             self.events.put(('archive_error',str(exc)))
         except Exception as exc:
             from .db_client import processing_error
-            from .client_diagnostics import write_failure
+            from .client_diagnostics import failure_notice
             error = exc if isinstance(exc,CollectionError) else processing_error(exc,'Windows DB·메일 검색 색인 생성')
             message = str(error)+'\n저장된 원본은 유지됩니다. 원인을 해결한 뒤 ‘기존 백업 갱신’을 다시 실행하세요.'
-            try:
-                recorded = write_failure(path.parent,error,'Windows DB·메일 검색 색인 생성')
-                message += '\n오류 기록: '+str(recorded)
-            except OSError:
-                pass
+            message += failure_notice(diagnostic_output,error,'Windows DB·메일 검색 색인 생성')
             self.events.put(('archive_error',message))
 
     def verify(self):
