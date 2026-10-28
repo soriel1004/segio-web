@@ -5,13 +5,15 @@ import json
 import os
 import re
 import shutil
+import stat
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from .archive import atomic_write
-from .backup_folders import require_backup_file
+from .backup_folders import require_backup_file, BaselineValidationError
+from .file_ops import merge_io, replace_file, remove_file, retry_file_io, file_diagnostic
 from .compact_mail import digest_file
 from .incremental import Baseline
 from .storage import require_space
@@ -44,8 +46,10 @@ def update_lock(root):
             else:
                 import fcntl
                 fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except OSError:
-            raise CollectionError('다른 작업이 기존 백업을 반영 중입니다. 해당 작업이 끝난 뒤 다시 실행하세요.') from None
+        except OSError as exc:
+            error=BaselineValidationError('backup_locked')
+            error.filesystem_diagnostic=file_diagnostic(exc)
+            raise error from None
         try:
             yield
         finally:
@@ -64,22 +68,28 @@ class DateBaseline(Baseline):
         with update_lock(root):
             self.recover(root)
         self.root, self.entries = root, {}
+        reason='manifest_invalid'
         try:
             path = require_backup_file(root,'manifest.json')
             if path.is_symlink() or path.stat().st_size > 16*1024*1024:
                 raise ValueError()
-            self.original_manifest = path.read_bytes()
+            with merge_io('read_previous','manifest.json'):
+                self.original_manifest = path.read_bytes()
             self.manifest = json.loads(self.original_manifest)
-            if (self.manifest.get('user') != user or self.manifest.get('format') != 'segio-db-html/1' or
-                    not isinstance(self.manifest.get('live_export'), dict) or
-                    self.manifest.get('state') not in ('collected', 'collected_with_warnings') or
+            if self.manifest.get('user') != user:
+                raise BaselineValidationError('account_mismatch')
+            if (self.manifest.get('format') != 'segio-db-html/1' or
+                    not isinstance(self.manifest.get('live_export'), dict)):
+                raise BaselineValidationError('manifest_invalid')
+            if (self.manifest.get('state') not in ('collected', 'collected_with_warnings') or
                     self.manifest.get('local_processing', {}).get('state') == 'pending'):
-                raise ValueError()
+                raise BaselineValidationError('incomplete')
             if (root/'mail/sources.json').exists() or 'mail/sources.json' in self.manifest['files']:
                 super().__init__(root, user, checkpoint)
             # Mail-only updates must not advance the approval snapshot time.
             # Legacy mail-only results lack that time: establish it with a
             # full approval export once instead of guessing a newer cutoff.
+            reason='time_unavailable'
             approval_time=self.manifest.get('approval_checkpoint')
             if approval_time is None and self.manifest['live_export'].get('approvals') is True:
                 approval_time=self.manifest['live_export'].get('requested_at')
@@ -95,18 +105,21 @@ class DateBaseline(Baseline):
             if isinstance(value, bool) or self.since < 1:
                 raise ValueError()
             for name in ('catalog.sqlite3', 'catalog.json'):
+                reason='database_changed' if name=='catalog.sqlite3' else 'catalog_changed'
                 require_backup_file(root,name)
-                if digest_file(self.raw_path(name), checkpoint) != self.manifest['files'][name]:
-                    raise ValueError()
+                with merge_io('read_previous',name):
+                    if digest_file(self.raw_path(name), checkpoint) != self.manifest['files'][name]:
+                        raise BaselineValidationError(reason)
+            reason='mail_list_changed'
             self.sources = (json.loads((root/'mail/sources.json').read_bytes()).get('sources', [])
                             if (root/'mail/sources.json').exists() else [])
             if self.manifest.get('viewer') != 'sqlite-mail/1':
-                raise ValueError()
+                raise BaselineValidationError('viewer_not_ready')
             from .portable_mail import VERSION
             if self.manifest.get('portable_mail',{}).get('version') != VERSION:
-                raise ValueError()
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
-            raise CollectionError('이전 백업의 완료 상태·기준 시각·검색 DB를 확인하지 못했습니다. 먼저 ‘기존 백업 갱신’으로 정상 완료한 본인 폴더를 선택하세요.') from None
+                raise BaselineValidationError('portable_not_ready')
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+            raise BaselineValidationError(reason) from None
 
     @staticmethod
     def journal(root):
@@ -136,7 +149,7 @@ class DateBaseline(Baseline):
             # Preserve it for review rather than guessing it can be removed.
             journal.unlink()
         except (OSError, ValueError, KeyError, TypeError):
-            raise CollectionError('이전 백업 반영이 중단된 기록이 있습니다. 기존 폴더와 .segio-previous- 폴더를 보존하고 PC 폴더 접근 상태를 확인하세요.') from None
+            raise BaselineValidationError('interrupted_update') from None
 
     def validate_delta(self, destination):
         manifest = json.loads((destination/'manifest.json').read_bytes())
@@ -186,13 +199,23 @@ class DateBaseline(Baseline):
         incoming_sources = (json.loads((destination/'mail/sources.json').read_bytes())['sources'] if mail else [])
         delta_raw = destination/'.incoming-mail'
         if (destination/'mail/raw').exists():
-            os.replace(destination/'mail/raw', delta_raw)
+            # A Windows scanner can hold the newly extracted directory open.
+            # Keep that directory in place and move only the received files.
+            with merge_io('stage_incoming_mail','mail/raw/'):
+                delta_raw.mkdir(mode=0o700)
+                for item in incoming_sources:
+                    checkpoint()
+                    replace_file(destination/item['path'],delta_raw/Path(item['path']).name,checkpoint)
         old_catalog = json.loads((self.root/'catalog.json').read_bytes())
         new_catalog = json.loads((destination/'catalog.json').read_bytes())
         catalog = {item['id']:item for item in old_catalog['items']}
         if approvals:
             catalog.update((item['id'],item) for item in new_catalog['items'])
         old_files, new_files = self.manifest['files'], dict(current['files'])
+        incoming_by_name={item['name_bytes_hex']:item for item in incoming_sources}
+        replacing_raw={item['path'] for item in self.sources
+                       if item['name_bytes_hex'] in incoming_by_name and
+                       any(item[key]!=incoming_by_name[item['name_bytes_hex']][key] for key in ('bytes','sha256'))}
         # Do not overwrite an inode shared with the old archive. Only immutable
         # raw mail and completed mail pages/attachments use hard links. All
         # writers replace those paths rather than truncating existing files.
@@ -204,29 +227,45 @@ class DateBaseline(Baseline):
             safe_member(name)
             if name in new_files and not name.startswith('mail/raw/'):
                 continue
+            if name in replacing_raw:
+                # A verified new version is already present. Do not create an
+                # old hard link only to detach it again during replacement.
+                continue
             source = self.raw_path(name)
             try:
-                actual=attachment_io(source.stat,name,missing=True)
+                with merge_io('inspect_previous',name):
+                    actual=attachment_io(lambda:retry_file_io(source.stat,checkpoint),name,missing=True)
                 if actual.st_size != expected['bytes']:
                     if attachment_name(name):continue
                     raise CollectionError('기존 백업 파일의 크기가 변경되었습니다. 파일 무결성을 검사하세요.')
             except AttachmentUnavailable:
                 continue  # The renderer records the absent attachment, never restores it.
             target = destination/name
-            target.parent.mkdir(parents=True, exist_ok=True)
+            with merge_io('create_work_folder',name):
+                target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 raise CollectionError('기존 백업 반영 경로가 중복됩니다.')
-            if name.startswith(('mail/raw/', 'mail/offline/')):
+            readonly=bool(getattr(actual,'st_file_attributes',0)&getattr(stat,'FILE_ATTRIBUTE_READONLY',1)) or not (actual.st_mode&stat.S_IWUSR)
+            if name.startswith(('mail/raw/', 'mail/offline/')) and not readonly:
                 try:
-                    attachment_io(lambda:os.link(source, target),name,missing=True)
+                    with merge_io('link_previous',name):
+                        attachment_io(lambda:retry_file_io(lambda:os.link(source,target),checkpoint),name,missing=True)
                 except AttachmentUnavailable:
                     continue
                 except OSError as exc:
+                    if getattr(exc,'winerror',None) in (225,226):
+                        raise
                     if exc.errno not in (errno.EXDEV, errno.EPERM, errno.ENOTSUP, errno.EACCES):
                         raise
-                    self.copy(source, target, expected, checkpoint, report)
+                    try:
+                        attachment_io(lambda:self.copy(source,target,expected,checkpoint,report,relative=name),name,missing=True)
+                    except AttachmentUnavailable:
+                        continue
             else:
-                self.copy(source, target, expected, checkpoint, report)
+                try:
+                    attachment_io(lambda:self.copy(source,target,expected,checkpoint,report,relative=name),name,missing=True)
+                except AttachmentUnavailable:
+                    continue
             report('merge', number, total, unit='files')
         files = dict(old_files)
         files.update({name:info for name,info in new_files.items() if not name.startswith('mail/raw/')})
@@ -240,11 +279,11 @@ class DateBaseline(Baseline):
             previous = by_name.get(item['name_bytes_hex'])
             incoming = delta_raw/Path(item['path']).name
             if previous and all(previous[key] == item[key] for key in ('bytes', 'sha256')):
-                incoming.unlink()
+                with merge_io('discard_overlap',item['path']):
+                    remove_file(incoming,checkpoint)
                 continue  # Inclusive second-boundary overlap is not a duplicate.
             if previous:
                 relative = previous['path']
-                (destination/relative).unlink()  # Detach the old immutable inode.
                 replaced += 1
             else:
                 if next_slot > 999999:
@@ -253,7 +292,10 @@ class DateBaseline(Baseline):
                 next_slot += 1
                 added += 1
             (destination/relative).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(incoming, destination/relative)
+            with merge_io('replace_mail',relative):
+                # Replace the staged directory entry without first deleting
+                # its hard link. Never truncate or chmod the old inode.
+                replace_file(incoming,destination/relative,checkpoint)
             entry = dict(item, path=relative)
             if previous:
                 sources[positions[item['name_bytes_hex']]] = entry
@@ -264,9 +306,16 @@ class DateBaseline(Baseline):
             files[relative] = {key:item[key] for key in ('bytes','sha256')}
             changed.append(relative)
         if delta_raw.exists():
-            delta_raw.rmdir()
-        save(destination/'catalog.json', {'items':list(catalog.values())})
-        save(destination/'mail/sources.json', {'user':current['user'], 'sources':sources, 'raw_files_complete':True})
+            if any(delta_raw.iterdir()):
+                raise CollectionError('추가 메일 준비 폴더에 반영하지 못한 원본이 남아 있습니다. 기존 백업을 유지하고 중단했습니다.')
+            try:
+                delta_raw.rmdir()
+            except OSError:
+                log('추가 백업의 빈 임시 폴더 정리를 확인하지 못했습니다. 백업 자료 검증은 계속합니다.')
+        with merge_io('save_metadata','catalog.json'):
+            save(destination/'catalog.json', {'items':list(catalog.values())})
+        with merge_io('save_metadata','mail/sources.json'):
+            save(destination/'mail/sources.json', {'user':current['user'], 'sources':sources, 'raw_files_complete':True})
         for name in ('catalog.json', 'mail/sources.json', 'catalog.sqlite3'):
             files[name] = digest_file(destination/name, checkpoint)
         current['files'] = files
@@ -291,27 +340,33 @@ class DateBaseline(Baseline):
         if approvals:
             current['last_incremental']['approval_since']=self.approval_since
             current['last_incremental']['received_approval_documents']=len(new_catalog['items'])
-        save(destination/'manifest.json', current)
+        with merge_io('save_metadata','manifest.json'):
+            save(destination/'manifest.json', current)
         log('기존 메일 원본을 유지하고 새 파일 %d개·변경 파일 %d개만 반영합니다.' % (added,replaced))
         return changed
 
     @staticmethod
-    def copy(source, target, expected, checkpoint, report):
+    def copy(source, target, expected, checkpoint, report, *, relative=''):
         require_space(target.parent, expected['bytes']+64*1024*1024, '기존 백업 반영')
         digest, size = hashlib.sha256(), 0
-        with source.open('rb') as incoming, target.open('xb') as outgoing:
-            while block := incoming.read(1024*1024):
-                checkpoint()
-                outgoing.write(block)
-                digest.update(block)
-                size += len(block)
-                if expected['bytes'] > 16*1024*1024:
-                    report('reuse',size,expected['bytes'])
+        # The copy is private and writable even when a source is read-only.
+        # Source permissions/attributes are never changed.
+        with merge_io('copy_previous',relative):
+            with merge_io('read_previous',relative):
+                incoming=retry_file_io(lambda:source.open('rb'),checkpoint)
+            with incoming, retry_file_io(lambda:target.open('xb'),checkpoint) as outgoing:
+                while block := incoming.read(1024*1024):
+                    checkpoint()
+                    outgoing.write(block)
+                    digest.update(block)
+                    size += len(block)
+                    if expected['bytes'] > 16*1024*1024:
+                        report('reuse',size,expected['bytes'])
         if {'bytes':size, 'sha256':digest.hexdigest()} != expected:
             raise CollectionError('기존 백업 파일의 SHA-256이 변경되었습니다. 파일 무결성을 검사하세요.')
 
     def commit(self, staging, checkpoint, log):
-        with update_lock(self.root):
+        with update_lock(self.root), merge_io('commit_backup','manifest.json'):
             return self._commit(staging,checkpoint,log)
 
     def _commit(self, staging, checkpoint, log):
@@ -329,11 +384,11 @@ class DateBaseline(Baseline):
             os.fsync(output.fileno())
         try:
             checkpoint()
-            os.replace(self.root, previous)
+            replace_file(self.root,previous,checkpoint)
             try:
-                os.replace(staging, self.root)
+                replace_file(staging,self.root,checkpoint)
             except BaseException:
-                os.replace(previous, self.root)
+                replace_file(previous,self.root)
                 raise
         except BaseException:
             if self.root.exists():

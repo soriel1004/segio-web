@@ -5,7 +5,8 @@ import re
 from pathlib import Path
 
 from .archive import atomic_write
-from .backup_folders import require_backup_file
+from .backup_folders import require_backup_file, BaselineValidationError
+from .file_ops import merge_io
 from .compact_mail import digest_file
 from .storage import require_space
 from .web import CollectionError
@@ -18,25 +19,31 @@ class Baseline:
         self.root=Path(root).expanduser().resolve()
         self.entries={}
         checkpoint()
+        reason='manifest_invalid'
         try:
             path=require_backup_file(self.root,'manifest.json')
             if path.is_symlink() or path.stat().st_size>16*1024*1024:
                 raise ValueError()
-            manifest=json.loads(path.read_bytes())
-            if (manifest.get('format')!='segio-db-html/1' or manifest.get('user')!=user or
-                    not isinstance(manifest.get('live_export'),dict) or
-                    manifest.get('state') not in ('collected','collected_with_warnings') or
+            with merge_io('read_previous','manifest.json'):
+                manifest=json.loads(path.read_bytes())
+            if manifest.get('user')!=user:
+                raise BaselineValidationError('account_mismatch')
+            if manifest.get('format')!='segio-db-html/1' or not isinstance(manifest.get('live_export'),dict):
+                raise BaselineValidationError('manifest_invalid')
+            if (manifest.get('state') not in ('collected','collected_with_warnings') or
                     manifest.get('local_processing',{}).get('state')=='pending'):
-                raise ValueError()
+                raise BaselineValidationError('incomplete')
             self.finished_at=manifest.get('finished_at','')
+            reason='mail_list_changed'
             source_path=self.root/'mail/sources.json'
             require_backup_file(self.root,'mail/sources.json')
             expected=manifest['files'].get('mail/sources.json')
             if not expected or source_path.is_symlink() or source_path.stat().st_size>16*1024*1024:
                 raise ValueError()
-            if digest_file(source_path,checkpoint)!=expected:
-                raise ValueError()
-            sources=json.loads(source_path.read_bytes())
+            with merge_io('read_previous','mail/sources.json'):
+                if digest_file(source_path,checkpoint)!=expected:
+                    raise BaselineValidationError('mail_list_changed')
+                sources=json.loads(source_path.read_bytes())
             if sources.get('user')!=user or sources.get('raw_files_complete') is False:
                 raise ValueError()
             for item in sources['sources']:
@@ -51,16 +58,17 @@ class Baseline:
                     raise ValueError()
                 path=self.raw_path(relative)
                 require_backup_file(self.root,relative)
-                if path.stat().st_size!=info['bytes']:
-                    raise ValueError()
+                with merge_io('inspect_previous',relative):
+                    if path.stat().st_size!=info['bytes']:
+                        raise BaselineValidationError('mail_size_changed')
                 self.entries[name]=dict(info,path=relative)
-        except (OSError,ValueError,KeyError,TypeError,AttributeError):
-            raise CollectionError('이전 백업의 그룹웨어 ID·완료 상태·메일 원본 검증 정보를 확인하지 못했습니다. 정상 완료한 본인 백업 폴더를 선택하거나 전체 백업을 실행하세요.') from None
+        except (ValueError,KeyError,TypeError,AttributeError):
+            raise BaselineValidationError(reason) from None
 
     def raw_path(self, relative):
         path=self.root/relative
         if not path.resolve().is_relative_to(self.root) or any(part.is_symlink() for part in (path,*path.parents) if part!=self.root):
-            raise ValueError('Unsafe baseline path')
+            raise BaselineValidationError('unsafe_path')
         return path
 
     def payload(self):

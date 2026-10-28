@@ -25,7 +25,7 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'FILE_ACCESS_DENIED','FILE_IO_ERROR','FILE_SECURITY_BLOCKED','DISK_FULL','FILE_TOO_LARGE',
                'UNEXPECTED_PROCESSING_ERROR','INVALID_JSON','LOCAL_INDEX_PENDING',
                'LOCAL_DATABASE_ERROR','LOCAL_TEXT_ENCODING_ERROR','MEMORY_LIMIT','MAIL_FORMAT_ERROR',
-               'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR','BASELINE_FILE_MISSING',
+               'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR','BASELINE_FILE_MISSING','BASELINE_INVALID',
                'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_CLOSED',
                'ERR_NAME_NOT_RESOLVED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID',
                'ERR_SSL_PROTOCOL_ERROR','ERR_SSL_VERSION_OR_CIPHER_MISMATCH','ERR_FAILED',
@@ -49,6 +49,9 @@ PROCESSING_SITES = {
     'mail_folders':{'__init__','info','boxes'},
     'db_client':{'receive','finalize_download','unpack_verified'},
     'attachment_safety':{'attachment_io','__init__','record'},
+    'date_incremental':{'__init__','prepare','copy','commit','_commit','recover'},
+    'incremental':{'__init__','raw_path'},
+    'file_ops':{'replace_file','remove_file','retry_file_io','merge_io'},
 }
 
 
@@ -169,9 +172,20 @@ def write_failure(output, exception, phase):
             'winerror':data.get('winerror') if type(data.get('winerror')) is int else None,
             'operation':data.get('operation') if data.get('operation') in ('replace','file_io') else 'file_io'}
     data = getattr(exception,'baseline_diagnostic',None)
-    if isinstance(data,dict) and data.get('required_file') in (
-            'manifest','catalog','search_database','mail_sources','mail_raw','backup_asset'):
-        record['baseline'] = {'required_file':data['required_file']}
+    if isinstance(data,dict):
+        from .backup_folders import BASELINE_REASONS
+        baseline={}
+        if data.get('required_file') in ('manifest','catalog','search_database','mail_sources','mail_raw','backup_asset'):
+            baseline['required_file']=data['required_file']
+        if isinstance(data.get('reason'),str) and data['reason'] in BASELINE_REASONS:
+            baseline['reason']=data['reason']
+        if baseline:record['baseline']=baseline
+    data = getattr(exception,'merge_diagnostic',None)
+    if isinstance(data,dict):
+        from .file_ops import MERGE_OPERATIONS, MERGE_KINDS
+        if (isinstance(data.get('operation'),str) and data['operation'] in MERGE_OPERATIONS and
+                isinstance(data.get('file_kind'),str) and data['file_kind'] in MERGE_KINDS):
+            record['merge']={key:data[key] for key in ('operation','file_kind')}
     output = Path(output).expanduser().resolve()
     output.mkdir(parents=True,exist_ok=True)
     destination = output/'last-client-failure.json'

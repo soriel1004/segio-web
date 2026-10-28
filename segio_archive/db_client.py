@@ -77,9 +77,24 @@ def processing_error(exc, phase):
         else:
             code, hint = 'UNEXPECTED_PROCESSING_ERROR', ('PC에 저장된 자료의 색인·메일 변환 처리를 확인하세요. 보존된 폴더에서 기존 백업 갱신을 실행할 수 있습니다.'
                 if phase=='Windows DB·메일 검색 색인 생성' else '서버 연결과 설치 상태를 확인하세요.')
-    error = CollectionError('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))
+    detail=''
+    merge=getattr(exc,'merge_diagnostic',None)
+    if isinstance(merge,dict):
+        operations={'stage_incoming_mail':'추가 메일 준비','inspect_previous':'기존 파일 확인',
+                    'create_work_folder':'준비 폴더 생성','link_previous':'기존 파일 연결',
+                    'copy_previous':'기존 파일 복사','read_previous':'기존 파일 읽기',
+                    'replace_mail':'추가 메일 반영','discard_overlap':'중복 수신 파일 정리',
+                    'save_metadata':'백업 목록 저장','commit_backup':'완료 백업 반영'}
+        kinds={'mail_raw':'메일 원본','mail_sources':'메일 원본 목록','mail_attachment':'메일 첨부',
+               'mail_page':'메일 바로보기','approval_document':'결재 문서','catalog':'결재 목록',
+               'search_database':'검색 DB','search_chunk':'검색 목록','manifest':'백업 기록','metadata':'백업 정보'}
+        operation,kind=merge.get('operation'),merge.get('file_kind')
+        if isinstance(operation,str) and operation in operations and isinstance(kind,str) and kind in kinds:
+            detail='\n확인된 작업: '+operations[operation]+' / '+kinds[kind]
+    error = CollectionError(('%s 단계에서 실패했습니다. %s [%s]' % (phase, hint, code))+detail)
     error.filesystem_diagnostic = file_diagnostic(exc)
     error.processing_diagnostic = processing_summary(exc)
+    error.merge_diagnostic = getattr(exc,'merge_diagnostic',None)
     return error
 
 
@@ -406,6 +421,8 @@ class PreparedDBCollector(Collector):
                 error = CollectionError(str(reason)+message+' [LOCAL_INDEX_PENDING]')
                 error.filesystem_diagnostic = getattr(reason,'filesystem_diagnostic',None)
                 error.processing_diagnostic = getattr(reason,'processing_diagnostic',None)
+                error.merge_diagnostic = getattr(reason,'merge_diagnostic',None)
+                error.baseline_diagnostic = getattr(reason,'baseline_diagnostic',None)
                 raise error from None
             self.checkpoint()
             self.progress('finalize')
