@@ -161,7 +161,7 @@ class App(tk.Tk):
 
     def backup_mode_changed(self):
         self.baseline_button.config(state='normal' if self.backup_mode.get()=='incremental' else 'disabled')
-        self.backup_hint.set('기존 백업 폴더 또는 그 상위 저장 폴더를 선택하세요. 결재는 마지막 결재 백업 이후 기안한 문서만 추가하며, 이전 문서의 상태 변경은 다시 가져오지 않습니다.' if self.backup_mode.get()=='incremental' else '전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
+        self.backup_hint.set('기존 백업 폴더 또는 그 상위 저장 폴더를 선택하세요. 결재·메일은 각 마지막 백업 기준 시각의 15일 전부터 가져와 기존 백업에 반영합니다.' if self.backup_mode.get()=='incremental' else '전체 백업은 Windows 저장 폴더 아래 새 폴더에 저장합니다.')
 
     def choose_baseline(self):
         if self.running:

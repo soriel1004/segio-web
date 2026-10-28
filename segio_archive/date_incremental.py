@@ -23,6 +23,8 @@ PROTOCOL = 'segio-mail-date/1'
 REVISION = 'file-time-merge-1'
 APPROVAL_REVISION = 'draft-time-merge-1'
 APPROVAL_PROTOCOL = 'segio-approval-date/1'
+LOOKBACK_DAYS = 15
+LOOKBACK_SECONDS = LOOKBACK_DAYS * 24 * 60 * 60
 
 
 def save(path, value):
@@ -93,17 +95,23 @@ class DateBaseline(Baseline):
             approval_time=self.manifest.get('approval_checkpoint')
             if approval_time is None and self.manifest['live_export'].get('approvals') is True:
                 approval_time=self.manifest['live_export'].get('requested_at')
+            self.approval_checkpoint=None
             self.approval_since=None
             if approval_time is not None:
                 if type(approval_time) is not int or approval_time<1:
                     raise ValueError()
-                self.approval_since=approval_time
+                self.approval_checkpoint=approval_time
+                self.approval_since=max(1,approval_time-LOOKBACK_SECONDS)
             value = self.manifest.get('mail_checkpoint', self.manifest['live_export'].get('requested_at'))
             if value is None:
                 value = datetime.fromisoformat(self.manifest['finished_at'].replace('Z', '+00:00')).timestamp()
-            self.since = int(value)
-            if isinstance(value, bool) or self.since < 1:
+            self.mail_checkpoint = int(value)
+            if isinstance(value, bool) or self.mail_checkpoint < 1:
                 raise ValueError()
+            # Preserve snapshot clocks separately from the overlapping request
+            # range. Repeated or single-kind updates must never subtract the
+            # lookback from a clock that has already been shifted.
+            self.since = max(1,self.mail_checkpoint-LOOKBACK_SECONDS)
             for name in ('catalog.sqlite3', 'catalog.json'):
                 reason='database_changed' if name=='catalog.sqlite3' else 'catalog_changed'
                 require_backup_file(root,name)
@@ -156,7 +164,7 @@ class DateBaseline(Baseline):
         delta = manifest.get('mail_delta', {})
         if (delta.get('protocol') != PROTOCOL or delta.get('revision') != REVISION or
                 delta.get('since') != self.since or type(manifest.get('mail_checkpoint')) is not int or
-                manifest['mail_checkpoint'] < self.since):
+                manifest['mail_checkpoint'] < self.mail_checkpoint):
             raise CollectionError('서버가 요청한 백업 기준 시각과 일치하는 추가 메일을 반환하지 않았습니다. 서버 공용 tools를 갱신하세요.')
         source_path = destination/'mail/sources.json'
         if source_path.stat().st_size > 16*1024*1024:
@@ -187,7 +195,7 @@ class DateBaseline(Baseline):
                 raise CollectionError('첫 결재 백업에 날짜 제한 결과가 반환되어 중단했습니다.')
         elif (not isinstance(delta,dict) or delta.get('protocol')!=APPROVAL_PROTOCOL or
                 delta.get('revision')!=APPROVAL_REVISION or delta.get('basis')!='document_wdate' or
-                delta.get('since')!=self.approval_since or checkpoint<self.approval_since):
+                delta.get('since')!=self.approval_since or checkpoint<self.approval_checkpoint):
             raise CollectionError('서버가 요청한 기안일 기준과 일치하는 추가 결재를 반환하지 않았습니다. 서버 공용 tools를 갱신하세요.')
 
     def prepare(self, destination, checkpoint, report, log, *, approvals=True, mail=True):
@@ -281,7 +289,7 @@ class DateBaseline(Baseline):
             if previous and all(previous[key] == item[key] for key in ('bytes', 'sha256')):
                 with merge_io('discard_overlap',item['path']):
                     remove_file(incoming,checkpoint)
-                continue  # Inclusive second-boundary overlap is not a duplicate.
+                continue  # The 15-day overlap must not duplicate unchanged mail.
             if previous:
                 relative = previous['path']
                 replaced += 1
@@ -326,15 +334,17 @@ class DateBaseline(Baseline):
             for key in ('snapshot_rows','document_presentation'):
                 if key in self.manifest:
                     current[key] = self.manifest[key]
-            if self.approval_since is not None:
-                current['approval_checkpoint']=self.approval_since
-        if not mail and 'mail_checkpoint' in self.manifest:
-            current['mail_checkpoint'] = self.manifest['mail_checkpoint']
+            if self.approval_checkpoint is not None:
+                current['approval_checkpoint']=self.approval_checkpoint
+        if not mail and ('mail_checkpoint' in self.manifest or self.sources or
+                         self.manifest['live_export'].get('mail')):
+            current['mail_checkpoint'] = self.mail_checkpoint
         for key in ('approval_status_map',):
             if key in self.manifest and key not in current:
                 current[key] = self.manifest[key]
         current['local_processing'] = {'state':'pending', 'changed_mail_sources':changed}
         current['last_incremental'] = {'protocol':PROTOCOL, 'since':self.since, 'merged':True,
+                                       'lookback_days':LOOKBACK_DAYS,
                                        'added_mail_files':added, 'changed_mail_files':replaced,
                                        'retained_mail_files':len(sources)-len(changed)}
         if approvals:

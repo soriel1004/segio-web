@@ -786,16 +786,16 @@ class DBCollector(PreparedDBCollector):
         if self.config.incremental_base:
             from .date_incremental import REVISION, APPROVAL_REVISION
             if self.config.mail and info.get('mail_date_revision')!=REVISION:
-                raise CollectionError('백업 시각 이후 메일만 받아 기존 폴더에 반영하려면 서버 공용 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
+                raise CollectionError('백업 시각의 15일 전부터 메일을 받아 기존 폴더에 반영하려면 서버 공용 tools를 최신 버전으로 설치하세요. 전체 백업은 기존 도구에서도 가능합니다.')
             if self.baseline is None:
                 self.prepare_baseline()
             if self.config.approvals:
                 if info.get('approval_date_revision')!=APPROVAL_REVISION:
-                    raise CollectionError('마지막 결재 백업 시각 이후 기안 문서만 추가하려면 서버 공용 tools를 최신 버전으로 설치하세요.')
+                    raise CollectionError('마지막 결재 백업 시각의 15일 전부터 기안 문서를 추가하려면 서버 공용 tools를 최신 버전으로 설치하세요.')
                 if self.baseline.approval_since is not None:
                     fields['approval_since']=str(self.baseline.approval_since)
                     cutoff=datetime.fromtimestamp(self.baseline.approval_since,timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
-                    self.log('추가 결재 기안일 기준: '+cutoff+' · 이후 기안한 문서만 추출합니다. 이전 문서의 상태 변경은 다시 가져오지 않습니다.')
+                    self.log('추가 결재 기안일 기준: '+cutoff+' · 마지막 결재 백업 기준 시각의 15일 전부터 기안한 문서를 추출합니다. 겹치는 문서는 기존 ID로 반영합니다.')
                 else:
                     self.log('이전 백업에 결재 기준 시각이 없어 이번 결재는 전체 추출합니다. 완료 후 다음 추가 백업부터 기안일 기준을 적용합니다.')
             if self.config.mail:
@@ -804,7 +804,7 @@ class DBCollector(PreparedDBCollector):
                     raise CollectionError('선택한 이전 백업에는 메일이 포함되지 않았습니다. 메일을 처음 보관할 때는 전체 백업을 실행하세요.')
                 fields['mail_since']=str(self.baseline.since)
                 cutoff=datetime.fromtimestamp(self.baseline.since,timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
-                self.log('추가 메일 기준 시각: '+cutoff+' · 이후 저장·변경된 파일만 추출합니다.')
+                self.log('추가 메일 기준 시각: '+cutoff+' · 마지막 메일 백업 기준 시각의 15일 전부터 저장·변경된 파일을 추출합니다. 같은 원본은 중복 추가하지 않습니다.')
             self.log('선택한 기존 백업 폴더에 추가 자료를 반영합니다.')
         self.start_requested = True
         started = self.live_call('start', post=True, approvals='1' if self.config.approvals else '0',

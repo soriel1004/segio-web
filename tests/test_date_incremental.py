@@ -10,7 +10,7 @@ import zipfile
 
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import search
-from segio_archive.date_incremental import DateBaseline, update_lock
+from segio_archive.date_incremental import DateBaseline, update_lock, LOOKBACK_SECONDS
 from segio_archive.db_client import unpack_verified
 from segio_archive.mail_import import build_local_catalog
 from segio_archive.web import Cancelled, CollectionError
@@ -30,7 +30,7 @@ class DateIncrementalTests(unittest.TestCase):
         self.base = DateBaseline(self.old, 'employee')
         self.old_inodes = {entry[2][:2] for entry in worker.inventory(str(self.mail))}
 
-    def export(self, number, base=None, changed=(), approvals=True, mail=True):
+    def export(self, number, base=None, changed=(), approvals=True, mail=True, timestamps=None):
         identifier = '%032x' % number
         job = self.root/'jobs'/identifier
         job.mkdir()
@@ -42,7 +42,10 @@ class DateIncrementalTests(unittest.TestCase):
                 request['approval_since'] = str(base.approval_since)
         worker.write_json(str(job/'request.json'),request)
         changed_inodes = {worker.fingerprint(str(self.mail/name))[:2] for name in changed}
+        timed_inodes = {worker.fingerprint(str(self.mail/name))[:2]:value for name,value in (timestamps or {}).items()}
         def timestamp(identity):
+            if identity[:2] in timed_inodes:
+                return timed_inodes[identity[:2]]
             return base.since-10 if identity[:2] in self.old_inodes and identity[:2] not in changed_inodes else base.since+1
         original = worker.copy_mail_file
         copied = []
@@ -160,6 +163,64 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertEqual(search(target,'New reply',kind='mail')['total'],1)
         self.assertEqual(json.loads((target/'manifest.json').read_bytes())['last_incremental']['added_mail_files'],0)
 
+    def test_fifteen_day_range_selects_both_kinds_and_merges_overlap_without_duplicates(self):
+        from segio_archive import portable_mail
+        day=24*60*60
+        self.assertEqual(self.base.since,self.base.mail_checkpoint-15*day)
+        self.assertEqual(self.base.approval_since,self.base.approval_checkpoint-15*day)
+        cutoff=self.base.approval_since
+        records=json.loads((self.root/'database.json').read_bytes())
+        records['employee']={'documents':[
+            {'no':'1','title':'Existing approval refreshed in overlap','wdate':cutoff+day},
+            {'no':'2','title':'Draft before overlap','wdate':cutoff-1},
+            {'no':'3','title':'Draft at fifteen day boundary','wdate':cutoff},
+            {'no':'4','title':'Draft ten days before backup','wdate':self.base.approval_checkpoint-10*day},
+            {'no':'5','title':'Draft after backup','wdate':self.base.approval_checkpoint+1}]}
+        (self.root/'database.json').write_text(json.dumps(records))
+        times={'before.eml':self.base.since-1,'boundary.eml':self.base.since,
+               'overlap.eml':self.base.mail_checkpoint-10*day,
+               'after.eml':self.base.mail_checkpoint+1,
+               'inbox.mbox':self.base.mail_checkpoint-5*day}
+        for name in times:
+            if name!='inbox.mbox':
+                (self.mail/name).write_bytes(('Subject: '+name+'\nDate: Mon, 01 Jan 1990 10:00:00 +0900\n\nnew').encode())
+        before=self.snapshot()
+        target=self.export(2,self.base,timestamps=times)
+        self.assertEqual(set(self.copied),{'inbox.mbox','boundary.eml','overlap.eml','after.eml'})
+        with patch.object(portable_mail,'render_record',wraps=portable_mail.render_record) as render:
+            self.prepare(target)
+            self.assertEqual(render.call_count,3)
+        self.assertEqual(self.snapshot(),before)
+        self.assertEqual(search(target,kind='mail')['total'],6)
+        self.assertEqual(search(target,'before.eml',kind='mail')['total'],0)
+        self.assertEqual(search(target,kind='approval')['total'],4)
+        self.assertEqual(search(target,'Existing approval refreshed',kind='approval')['total'],1)
+        self.assertEqual(search(target,'Draft before overlap',kind='approval')['total'],0)
+        manifest=json.loads((target/'manifest.json').read_bytes())
+        self.assertEqual(manifest['last_incremental']['lookback_days'],15)
+        self.assertEqual(manifest['last_incremental']['added_mail_files'],3)
+        self.assertEqual(manifest['last_incremental']['changed_mail_files'],0)
+        self.base.commit(target,lambda:None,lambda _:None)
+        again=DateBaseline(self.old,'employee')
+        self.assertEqual(again.since,manifest['mail_checkpoint']-15*day)
+        self.assertEqual(again.approval_since,manifest['approval_checkpoint']-15*day)
+
+    def test_cutoffs_use_saved_clocks_instead_of_folder_name_or_modification_time(self):
+        path=self.old/'manifest.json'
+        manifest=json.loads(path.read_bytes())
+        manifest.update(mail_checkpoint=1700000000,approval_checkpoint=1700200000)
+        path.write_text(json.dumps(manifest))
+        renamed=self.old.with_name('segio-employee-1990-01-01')
+        self.old.rename(renamed)
+        os.utime(renamed,(1800000000,1800000000))
+        baseline=DateBaseline(renamed,'employee')
+        self.assertEqual(baseline.since,1700000000-LOOKBACK_SECONDS)
+        self.assertEqual(baseline.approval_since,1700200000-LOOKBACK_SECONDS)
+        manifest.update(mail_checkpoint=100,approval_checkpoint=200)
+        (renamed/'manifest.json').write_text(json.dumps(manifest))
+        baseline=DateBaseline(renamed,'employee')
+        self.assertEqual((baseline.since,baseline.approval_since),(1,1))
+
     def test_changed_mailbox_is_replaced_without_touching_old_backup_until_commit(self):
         before = self.snapshot()
         with (self.mail/'inbox.mbox').open('ab') as output:
@@ -239,12 +300,16 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertNotIn('approval_checkpoint',json.loads((target/'manifest.json').read_bytes()))
         self.base.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None,approvals=False)
         manifest=json.loads((target/'manifest.json').read_bytes())
-        self.assertEqual(manifest['approval_checkpoint'],self.base.approval_since)
+        self.assertEqual(manifest['approval_checkpoint'],self.base.approval_checkpoint)
+        build_local_catalog(target,'employee')
+        again=DateBaseline(target,'employee')
+        self.assertEqual(again.approval_since,self.base.approval_since)
+        self.assertEqual(again.since,again.mail_checkpoint-LOOKBACK_SECONDS)
         path=self.old/'manifest.json'
         legacy=json.loads(path.read_bytes())
         legacy.pop('approval_checkpoint')
         path.write_text(json.dumps(legacy))
-        self.assertEqual(DateBaseline(self.old,'employee').approval_since,legacy['live_export']['requested_at'])
+        self.assertEqual(DateBaseline(self.old,'employee').approval_since,legacy['live_export']['requested_at']-LOOKBACK_SECONDS)
         legacy['live_export']['approvals']=False
         path.write_text(json.dumps(legacy))
         self.assertIsNone(DateBaseline(self.old,'employee').approval_since)
@@ -258,7 +323,10 @@ class DateIncrementalTests(unittest.TestCase):
         self.base.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None,mail=False)
         build_local_catalog(target,'employee')
         manifest=json.loads((target/'manifest.json').read_bytes())
-        self.assertEqual(manifest['mail_checkpoint'],self.base.since)
+        self.assertEqual(manifest['mail_checkpoint'],self.base.mail_checkpoint)
+        again=DateBaseline(target,'employee')
+        self.assertEqual(again.since,self.base.since)
+        self.assertEqual(again.approval_since,again.approval_checkpoint-LOOKBACK_SECONDS)
         self.assertEqual(search(target,kind='mail')['total'],3)
         self.assertEqual(search(target,kind='approval')['total'],2)
         self.assertTrue(verify_archive(target)['ok'])
@@ -273,10 +341,24 @@ class DateIncrementalTests(unittest.TestCase):
             invalid=copy.deepcopy(manifest)
             invalid['approval_delta'][key]=value
             with self.assertRaises(CollectionError):self.base.validate_approval_delta(invalid)
-        for value in (None,0,True,self.base.approval_since-1):
+        for value in (None,0,True,self.base.approval_since-1,self.base.approval_checkpoint-1):
             invalid=copy.deepcopy(manifest)
             invalid['approval_checkpoint']=value
             with self.assertRaises(CollectionError):self.base.validate_approval_delta(invalid)
+
+    def test_approval_only_preserves_legacy_mail_request_time_without_shifting_twice(self):
+        path=self.old/'manifest.json'
+        manifest=json.loads(path.read_bytes())
+        manifest.pop('mail_checkpoint')
+        path.write_text(json.dumps(manifest))
+        baseline=DateBaseline(self.old,'employee')
+        self.assertEqual(baseline.mail_checkpoint,manifest['live_export']['requested_at'])
+        target=self.export(2,baseline,mail=False)
+        baseline.prepare(target,lambda:None,lambda *a,**k:None,lambda _:None,mail=False)
+        build_local_catalog(target,'employee')
+        again=DateBaseline(target,'employee')
+        self.assertEqual(again.mail_checkpoint,baseline.mail_checkpoint)
+        self.assertEqual(again.since,baseline.since)
 
     def test_file_timestamp_selection_is_inclusive_and_does_not_use_date_header(self):
         identity=(1,2,100,1000.0,1500.0)
@@ -287,6 +369,9 @@ class DateIncrementalTests(unittest.TestCase):
         self.assertEqual(worker.parse_mail_since('123'),123)
         target=self.export(2,self.base)
         manifest=json.loads((target/'manifest.json').read_bytes())
+        invalid=dict(manifest,mail_checkpoint=self.base.mail_checkpoint-1)
+        (target/'manifest.json').write_text(json.dumps(invalid))
+        with self.assertRaises(CollectionError):self.base.validate_delta(target)
         manifest['mail_delta']['since']+=1
         (target/'manifest.json').write_text(json.dumps(manifest))
         with self.assertRaises(CollectionError):self.base.validate_delta(target)

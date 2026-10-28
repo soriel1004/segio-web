@@ -816,6 +816,9 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                 self.assertEqual(result,base)
                 self.assertEqual(config.output,selected_output)
                 self.assertFalse((selected_output/'last-client-failure.json').exists())
+                from segio_archive.date_incremental import LOOKBACK_SECONDS
+                previous=json.loads(saved['manifest.json'])
+                self.assertEqual(manifest['mail_delta']['since'],previous['mail_checkpoint']-LOOKBACK_SECONDS)
                 self.assertEqual(manifest['last_incremental']['added_mail_files'],1)
                 self.assertTrue(verify_archive(result)['ok'])
                 from segio_archive.compact_mail import search
@@ -836,7 +839,8 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                               browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
                 base=DBCollector(config).run(PASSWORD)
                 before=json.loads((base/'manifest.json').read_bytes())
-                cutoff=before['approval_checkpoint']
+                from segio_archive.date_incremental import LOOKBACK_SECONDS
+                cutoff=before['approval_checkpoint']-LOOKBACK_SECONDS
                 saved=(base/'documents/1/database.json').read_bytes()
                 records=json.loads(original)
                 records['employee']={'documents':[
