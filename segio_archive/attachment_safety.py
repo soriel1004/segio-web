@@ -22,6 +22,21 @@ def attachment_name(name):
     return isinstance(name,str) and bool(re.fullmatch(r'mail/offline/mail-[0-9]{9}/attachments/[^/\\\x00]+',name)) and name.rsplit('/',1)[1] not in ('.','..')
 
 
+def legacy_attachment_alias(name):
+    """Recognize only the old 80-character mail attachment truncation bug."""
+    if not isinstance(name,str):
+        return None
+    match=re.fullmatch(r'(mail/offline/mail-[0-9]{9}/attachments/[0-9]+-)([^/\\\x00]+)',name)
+    if not match:
+        return None
+    leaf=match[2]
+    if (not leaf.endswith((' ','.')) or
+            not (len(leaf)==80 or (len(leaf)==85 and leaf.startswith('file_')))):
+        return None
+    normalized=leaf.rstrip(' .')
+    return match[1]+normalized if normalized else None
+
+
 def security_error(exc):
     # Windows ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED. Ordinary access
     # denied, locks, full disks and raw-source failures remain fatal errors.

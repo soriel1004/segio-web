@@ -26,7 +26,7 @@ ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARG
                'UNEXPECTED_PROCESSING_ERROR','INVALID_JSON','LOCAL_INDEX_PENDING',
                'LOCAL_DATABASE_ERROR','LOCAL_TEXT_ENCODING_ERROR','MEMORY_LIMIT','MAIL_FORMAT_ERROR',
                'CANCELLED','BROWSER_UNAVAILABLE','COLLECTION_ERROR','BASELINE_FILE_MISSING','BASELINE_INVALID',
-               'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_CLOSED',
+               'INVALID_BACKUP_PATH','ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_CLOSED',
                'ERR_NAME_NOT_RESOLVED','ERR_CERT_AUTHORITY_INVALID','ERR_CERT_DATE_INVALID',
                'ERR_SSL_PROTOCOL_ERROR','ERR_SSL_VERSION_OR_CIPHER_MISMATCH','ERR_FAILED',
                'ECONNREFUSED','ECONNRESET','ENOTFOUND','CERT_HAS_EXPIRED'}
@@ -191,6 +191,13 @@ def write_failure(output, exception, phase):
         if (isinstance(data.get('operation'),str) and data['operation'] in MERGE_OPERATIONS and
                 isinstance(data.get('file_kind'),str) and data['file_kind'] in MERGE_KINDS):
             record['merge']={key:data[key] for key in ('operation','file_kind')}
+    data = getattr(exception,'path_diagnostic',None)
+    if isinstance(data,dict):
+        from .file_ops import MERGE_KINDS
+        reasons={'invalid_structure','trailing_character','reserved_name','invalid_character','alias_collision'}
+        if (isinstance(data.get('reason'),str) and data['reason'] in reasons and
+                isinstance(data.get('file_kind'),str) and data['file_kind'] in MERGE_KINDS):
+            record['path']={key:data[key] for key in ('reason','file_kind')}
     output = Path(output).expanduser().resolve()
     output.mkdir(parents=True,exist_ok=True)
     destination = output/'last-client-failure.json'

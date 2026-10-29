@@ -23,7 +23,18 @@ def utc_now() -> str:
 
 
 def safe_name(value: str, limit: int = 70) -> str:
+    return _filename(value, limit, trim_tail=True)
+
+
+def legacy_mail_attachment_name(value: str) -> str:
+    """Identify names in old mail metadata; never name new attachments with this."""
+    return _filename(value, 80, trim_tail=False)
+
+
+def _filename(value: str, limit: int, *, trim_tail: bool) -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")[:limit]
+    if trim_tail:
+        value = value.rstrip(" .")
     if not value or value.split(".")[0].upper() in {
         "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
         *(f"LPT{i}" for i in range(1, 10)),

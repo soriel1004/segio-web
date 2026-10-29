@@ -18,7 +18,7 @@ from urllib.parse import quote
 from bs4 import BeautifulSoup
 from bs4.exceptions import ParserRejectedMarkup
 
-from .archive import atomic_write, safe_name
+from .archive import atomic_write, safe_name, legacy_mail_attachment_name
 from .compact_mail import digest_file
 from .mail_import import decode_bytes, header_text
 from .web import CollectionError
@@ -333,11 +333,20 @@ def render_message(root, manifest, stream, record, checkpoint):
             filename=header_text(filename,issues) or ('message.eml' if part.get_content_type()=='message/rfc822' else 'attachment.bin')
             name=f'attachments/{number}-{safe_name(filename,80)}'
             relative=directory+'/'+name
+            # Keep verified old names and their quarantine records together.
+            # A new filename must not bypass a previous security decision.
+            from .attachment_safety import legacy_attachment_alias
+            legacy=f'{directory}/attachments/{number}-{legacy_mail_attachment_name(filename)}'
+            legacy_known=(legacy_attachment_alias(legacy) is not None and
+                          (legacy in manifest['files'] or legacy in status.skipped))
+            if legacy_known:
+                relative=legacy
+                name=legacy.removeprefix(directory+'/')
             if relative in status.skipped:
                 unavailable.append(filename)
                 continue
             try:
-                if previous_attachments and not cache_matched:
+                if (previous_attachments or legacy_known) and not cache_matched:
                     # Old releases could stop after writing attachments but
                     # before saving state.json. Do not recreate a disappeared
                     # attachment from that incomplete attempt. Verify/reuse only

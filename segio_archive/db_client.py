@@ -118,19 +118,43 @@ def download_opener(cookies):
     return urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(jar))
 
 
+def invalid_member(name, reason):
+    from .file_ops import merge_file_kind
+    message=('백업 자료에 Windows에서 사용할 수 없는 파일 경로가 있습니다.'
+             if reason in ('trailing_character','reserved_name','invalid_character','alias_collision') else
+             '백업 자료에 안전하지 않은 파일 경로가 있습니다.')
+    error=CollectionError(message+' [INVALID_BACKUP_PATH]')
+    error.path_diagnostic={'reason':reason,'file_kind':merge_file_kind(name) if isinstance(name,str) else 'metadata'}
+    return error
+
+
 def safe_member(name):
     if not isinstance(name, str) or not name or '\\' in name or '\x00' in name:
-        raise CollectionError("ZIP에 안전하지 않은 파일 경로가 있습니다.")
+        raise invalid_member(name,'invalid_structure')
     path = PurePosixPath(name)
     if path.is_absolute() or path.as_posix()!=name:
-        raise CollectionError("ZIP에 안전하지 않은 파일 경로가 있습니다.")
+        raise invalid_member(name,'invalid_structure')
     for part in path.parts:
         stem = part.split('.')[0].upper()
-        if (part in {'.', '..'} or part.endswith((' ', '.')) or
-                re.search(r'[<>:"|?*\x00-\x1f]', part) or
-                stem in {'CON', 'PRN', 'AUX', 'NUL'} or re.fullmatch(r'(COM|LPT)[1-9]', stem)):
-            raise CollectionError("ZIP에 Windows에서 사용할 수 없는 파일 경로가 있습니다.")
+        if part in {'.','..'}:
+            raise invalid_member(name,'invalid_structure')
+        if part.endswith((' ','.')):
+            raise invalid_member(name,'trailing_character')
+        if re.search(r'[<>:"|?*\x00-\x1f]',part):
+            raise invalid_member(name,'invalid_character')
+        if stem in {'CON','PRN','AUX','NUL'} or re.fullmatch(r'(COM|LPT)[1-9]',stem):
+            raise invalid_member(name,'reserved_name')
     return path
+
+
+def existing_member(name):
+    """Only existing local mail attachments may retain a verified legacy name."""
+    from .attachment_safety import legacy_attachment_alias
+    alias=legacy_attachment_alias(name)
+    if alias is not None:
+        safe_member(alias)
+        return PurePosixPath(name)
+    return safe_member(name)
 
 
 def unpack_verified(source: Path, destination: Path, username: str, checkpoint=lambda: None, progress=None):
@@ -423,6 +447,7 @@ class PreparedDBCollector(Collector):
                 error.processing_diagnostic = getattr(reason,'processing_diagnostic',None)
                 error.merge_diagnostic = getattr(reason,'merge_diagnostic',None)
                 error.baseline_diagnostic = getattr(reason,'baseline_diagnostic',None)
+                error.path_diagnostic = getattr(reason,'path_diagnostic',None)
                 raise error from None
             self.checkpoint()
             self.progress('finalize')

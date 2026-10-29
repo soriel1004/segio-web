@@ -77,6 +77,7 @@ class DateBaseline(Baseline):
             with merge_io('read_previous','manifest.json'):
                 self.manifest,self.original_manifest_signature=read_backup_metadata(path,checkpoint)
             validate_baseline_manifest(self.manifest,user)
+            self.validate_existing_paths(checkpoint)
             if (root/'mail/sources.json').exists() or 'mail/sources.json' in self.manifest['files']:
                 self.load_mail_sources(self.manifest,user,checkpoint)
             # Mail-only updates must not advance the approval snapshot time.
@@ -117,6 +118,25 @@ class DateBaseline(Baseline):
                 raise BaselineValidationError('portable_not_ready')
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
             raise BaselineValidationError(reason) from None
+
+    def validate_existing_paths(self, checkpoint):
+        from .db_client import existing_member, invalid_member
+        from .attachment_safety import legacy_attachment_alias
+        aliases={}
+        for name in self.manifest['files']:
+            checkpoint()
+            existing_member(name)
+            alias=legacy_attachment_alias(name)
+            if alias is not None:
+                key=alias.casefold()
+                if key in aliases:
+                    raise invalid_member(name,'alias_collision')
+                aliases[key]=name
+        if aliases:
+            for name in self.manifest['files']:
+                checkpoint()
+                if name.casefold() in aliases and aliases[name.casefold()]!=name:
+                    raise invalid_member(name,'alias_collision')
 
     @staticmethod
     def journal(root):
@@ -187,7 +207,7 @@ class DateBaseline(Baseline):
 
     def prepare(self, destination, checkpoint, report, log, *, approvals=True, mail=True):
         """Keep old raw/pages immutable; only private metadata is rewritten."""
-        from .db_client import safe_member
+        from .db_client import existing_member
         from .attachment_safety import attachment_io, attachment_name, AttachmentUnavailable
         destination = Path(destination)
         current = json.loads((destination/'manifest.json').read_bytes())
@@ -219,7 +239,7 @@ class DateBaseline(Baseline):
         report('merge', 0, total, unit='files')
         for number, (name, expected) in enumerate(old_files.items(), 1):
             checkpoint()
-            safe_member(name)
+            existing_member(name)
             if name in new_files and not name.startswith('mail/raw/'):
                 continue
             if name in replacing_raw:
