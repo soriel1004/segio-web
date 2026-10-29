@@ -179,6 +179,11 @@ def write_failure(output, exception, phase):
             baseline['required_file']=data['required_file']
         if isinstance(data.get('reason'),str) and data['reason'] in BASELINE_REASONS:
             baseline['reason']=data['reason']
+        if data.get('metadata_kind') in ('manifest','mail_sources'):
+            baseline['metadata_kind']=data['metadata_kind']
+        for key in ('metadata_bytes','json_line','json_column'):
+            if type(data.get(key)) is int and 0<=data[key]<=0x7fffffffffffffff:
+                baseline[key]=data[key]
         if baseline:record['baseline']=baseline
     data = getattr(exception,'merge_diagnostic',None)
     if isinstance(data,dict):

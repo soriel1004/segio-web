@@ -89,6 +89,7 @@ def install(web_user, config, root=None, mail_template=None):
     print('Incremental mail revision: mail-hash-delta-1; cancellation cleanup: cancel-discard-1.')
     print('Date-selected mail revision: file-time-merge-1.')
     print('Date-selected approval revision: draft-time-merge-1.')
+    print('Backup metadata revision: metadata-size-unlimited-1; no fixed manifest size limit.')
     print('Private configuration: ' + path)
     print('Mail template: ' + settings['mail_template'])
     print('No employee archive was prepared. Windows login starts a fresh job.')

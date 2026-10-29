@@ -12,7 +12,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .archive import atomic_write
-from .backup_folders import require_backup_file, BaselineValidationError
+from .backup_folders import (require_backup_file, BaselineValidationError,
+                             read_backup_metadata, validate_baseline_manifest)
 from .file_ops import merge_io, replace_file, remove_file, retry_file_io, file_diagnostic
 from .compact_mail import digest_file
 from .incremental import Baseline
@@ -69,25 +70,15 @@ class DateBaseline(Baseline):
             require_backup_file(root,'manifest.json')
         with update_lock(root):
             self.recover(root)
-        self.root, self.entries = root, {}
+        self.root, self.entries, self.sources = root, {}, []
         reason='manifest_invalid'
         try:
             path = require_backup_file(root,'manifest.json')
-            if path.is_symlink() or path.stat().st_size > 16*1024*1024:
-                raise ValueError()
             with merge_io('read_previous','manifest.json'):
-                self.original_manifest = path.read_bytes()
-            self.manifest = json.loads(self.original_manifest)
-            if self.manifest.get('user') != user:
-                raise BaselineValidationError('account_mismatch')
-            if (self.manifest.get('format') != 'segio-db-html/1' or
-                    not isinstance(self.manifest.get('live_export'), dict)):
-                raise BaselineValidationError('manifest_invalid')
-            if (self.manifest.get('state') not in ('collected', 'collected_with_warnings') or
-                    self.manifest.get('local_processing', {}).get('state') == 'pending'):
-                raise BaselineValidationError('incomplete')
+                self.manifest,self.original_manifest_signature=read_backup_metadata(path,checkpoint)
+            validate_baseline_manifest(self.manifest,user)
             if (root/'mail/sources.json').exists() or 'mail/sources.json' in self.manifest['files']:
-                super().__init__(root, user, checkpoint)
+                self.load_mail_sources(self.manifest,user,checkpoint)
             # Mail-only updates must not advance the approval snapshot time.
             # Legacy mail-only results lack that time: establish it with a
             # full approval export once instead of guessing a newer cutoff.
@@ -119,8 +110,6 @@ class DateBaseline(Baseline):
                     if digest_file(self.raw_path(name), checkpoint) != self.manifest['files'][name]:
                         raise BaselineValidationError(reason)
             reason='mail_list_changed'
-            self.sources = (json.loads((root/'mail/sources.json').read_bytes()).get('sources', [])
-                            if (root/'mail/sources.json').exists() else [])
             if self.manifest.get('viewer') != 'sqlite-mail/1':
                 raise BaselineValidationError('viewer_not_ready')
             from .portable_mail import VERSION
@@ -167,9 +156,7 @@ class DateBaseline(Baseline):
                 manifest['mail_checkpoint'] < self.mail_checkpoint):
             raise CollectionError('서버가 요청한 백업 기준 시각과 일치하는 추가 메일을 반환하지 않았습니다. 서버 공용 tools를 갱신하세요.')
         source_path = destination/'mail/sources.json'
-        if source_path.stat().st_size > 16*1024*1024:
-            raise CollectionError('추가 메일 원본 목록이 너무 큽니다.')
-        sources = json.loads(source_path.read_bytes())
+        sources,_ = read_backup_metadata(source_path,kind='mail_sources')
         names, paths = set(), set()
         if sources.get('user') != self.manifest['user'] or sources.get('raw_files_complete') is False:
             raise CollectionError('추가 메일의 사용자 또는 원본 목록이 일치하지 않습니다.')
@@ -381,7 +368,9 @@ class DateBaseline(Baseline):
 
     def _commit(self, staging, checkpoint, log):
         checkpoint()
-        if (self.root/'manifest.json').read_bytes() != self.original_manifest:
+        path=self.root/'manifest.json'
+        if (path.stat().st_size!=self.original_manifest_signature['bytes'] or
+                digest_file(path,checkpoint)!=self.original_manifest_signature):
             raise CollectionError('작업 중 기존 백업이 변경되어 반영을 중단했습니다. 다른 백업·갱신 작업이 끝난 뒤 다시 실행하세요.')
         previous = self.root.parent/('.segio-previous-'+uuid.uuid4().hex)
         journal = self.journal(self.root)

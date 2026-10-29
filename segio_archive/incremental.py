@@ -5,7 +5,8 @@ import re
 from pathlib import Path
 
 from .archive import atomic_write
-from .backup_folders import require_backup_file, BaselineValidationError
+from .backup_folders import (require_backup_file, BaselineValidationError,
+                             read_backup_metadata, validate_baseline_manifest)
 from .file_ops import merge_io
 from .compact_mail import digest_file
 from .storage import require_space
@@ -19,33 +20,32 @@ class Baseline:
         self.root=Path(root).expanduser().resolve()
         self.entries={}
         checkpoint()
+        path=require_backup_file(self.root,'manifest.json')
+        with merge_io('read_previous','manifest.json'):
+            manifest,_=read_backup_metadata(path,checkpoint)
+        validate_baseline_manifest(manifest,user)
+        self.load_mail_sources(manifest,user,checkpoint)
+
+    def load_mail_sources(self, manifest, user, checkpoint):
+        """Validate sources against the already-read manifest in date-based updates."""
         reason='manifest_invalid'
         try:
-            path=require_backup_file(self.root,'manifest.json')
-            if path.is_symlink() or path.stat().st_size>16*1024*1024:
-                raise ValueError()
-            with merge_io('read_previous','manifest.json'):
-                manifest=json.loads(path.read_bytes())
-            if manifest.get('user')!=user:
-                raise BaselineValidationError('account_mismatch')
-            if manifest.get('format')!='segio-db-html/1' or not isinstance(manifest.get('live_export'),dict):
-                raise BaselineValidationError('manifest_invalid')
-            if (manifest.get('state') not in ('collected','collected_with_warnings') or
-                    manifest.get('local_processing',{}).get('state')=='pending'):
-                raise BaselineValidationError('incomplete')
             self.finished_at=manifest.get('finished_at','')
             reason='mail_list_changed'
             source_path=self.root/'mail/sources.json'
             require_backup_file(self.root,'mail/sources.json')
             expected=manifest['files'].get('mail/sources.json')
-            if not expected or source_path.is_symlink() or source_path.stat().st_size>16*1024*1024:
+            if not expected:
                 raise ValueError()
             with merge_io('read_previous','mail/sources.json'):
-                if digest_file(source_path,checkpoint)!=expected:
+                sources,actual=read_backup_metadata(source_path,checkpoint,kind='mail_sources')
+                if actual!=expected:
                     raise BaselineValidationError('mail_list_changed')
-                sources=json.loads(source_path.read_bytes())
             if sources.get('user')!=user or sources.get('raw_files_complete') is False:
                 raise ValueError()
+            if not isinstance(sources.get('sources'),list):
+                raise ValueError()
+            self.sources=sources['sources']
             for item in sources['sources']:
                 checkpoint()
                 name=item['name_bytes_hex']

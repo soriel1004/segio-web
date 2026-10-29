@@ -133,7 +133,7 @@ def prepare(root):
                                          binary=request['psql'], live_scope=True, pack=False)
             if archive:
                 os.unlink(archive)
-            manifest = read_json(os.path.join(folder, 'manifest.json'), 64 * 1024 * 1024)
+            manifest = read_json(os.path.join(folder, 'manifest.json'), None)
         else:
             folder = os.path.join(root, 'bundle')
             os.mkdir(folder, 0o700)

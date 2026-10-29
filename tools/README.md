@@ -4,6 +4,29 @@
 
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.10)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
+<a id="metadata-size-install"></a>
+
+## v0.6.10 생성된 manifest 크기 제한 제거
+
+Windows v0.6.10은 기존·수신 manifest와 메일 원본 목록의 고정 크기 제한을 제거합니다. 정상 완료한 큰 백업을 추가 백업의 기준으로 계속 사용할 수 있으며, 15일 전부터 추가 추출하는 범위와 사용자·경로·해시 검증을 유지합니다. 이번 `BASELINE_INVALID / manifest_invalid`의 PC 사전 확인 오류는 Windows 프로그램 교체로 해결합니다.
+
+공용 서버 도구도 생성된 결재 manifest를 읽을 때 크기로 거부하지 않도록 수정했습니다. 개인 로그인 작업기의 16 MiB 제한과 SSH 도구의 64 MiB 제한을 없애고, 설정·작업 요청·상태 JSON의 기존 제한은 유지합니다. 두 프로그램의 통신 규약·직원 범위·기존 원본·인증/DB 설정을 변경하지 않습니다.
+
+서버의 대용량 결재 추출에도 적용하려면 진행 중인 백업이 끝난 뒤 root SSH에서 설치합니다. 그룹웨어 재부팅은 필요하지 않습니다.
+
+```bash
+TOOLS_DIR=$(mktemp -d /root/segio-tools.XXXXXX) &&
+curl -fL https://raw.githubusercontent.com/soriel1004/segio-web/main/downloads/segio-web-0.6.10.zip \
+  -o "$TOOLS_DIR/segio-web-0.6.10.zip" &&
+unzip -q "$TOOLS_DIR/segio-web-0.6.10.zip" -d "$TOOLS_DIR" &&
+cd "$TOOLS_DIR/segio-web-0.6.10/tools" &&
+/usr/bin/python ./check_shared_tools.py &&
+/usr/bin/python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+출력에서 **`Backup metadata revision: metadata-size-unlimited-1; no fixed manifest size limit.`**을 확인하세요. 기존 Windows 클라이언트와 SSH EXE의 파일명·업로드 목록·기존 작업 경로는 유지합니다.
+
 ## SSH v0.4.5 원본 검사 재시도·진행률
 
 SSH 작업기는 MBOX를 복사하지 않고 원본을 해시하며 용량·파일 수를 보고합니다. 목록이 바뀌면 최대 3회 대조하고 그대로인 파일의 해시를 재사용합니다. SSH 파일 업로드 목록·통신 규약은 유지하므로 기존 SSH 클라이언트와도 호환됩니다. 최신 Windows 프로그램은 자체 `tools`를 비공개 작업 폴더에 올리므로 SSH 사용을 위해 웹 연결 기능을 설치할 필요가 없습니다.

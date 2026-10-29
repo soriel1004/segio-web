@@ -27,6 +27,7 @@ MAIL_COPY_REVISION = 'mail-retry-progress-1'
 INCREMENTAL_REVISION = 'mail-hash-delta-1'
 CANCEL_CLEANUP_REVISION = 'cancel-discard-1'
 MAIL_DATE_REVISION = 'file-time-merge-1'
+METADATA_REVISION = 'metadata-size-unlimited-1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
     'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
@@ -108,6 +109,10 @@ def read_json(path, limit=65536):
     if os.path.islink(path):
         raise SafeError('unsafe_job')
     with open(path, 'rb') as stream:
+        # Only callers reading generated backup metadata opt out. Config and
+        # HTTP job requests keep their existing bounded control-file reads.
+        if limit is None:
+            return json.load(stream)
         data = stream.read(limit + 1)
     if len(data) > limit:
         raise SafeError('invalid_metadata')
@@ -453,7 +458,7 @@ def run_job(config_path, job_id):
                                                binary=config.get('psql', '/usr/bin/psql'), live_scope=True,checkpoint=checkpoint,
                                                approval_since=approval_since)
             os.unlink(intermediate)
-            manifest = read_json(os.path.join(folder, 'manifest.json'), 16 * 1024 * 1024)
+            manifest = read_json(os.path.join(folder, 'manifest.json'), None)
             manifest['approval_checkpoint'] = approval_checkpoint
             if approval_since is not None:
                 manifest['approval_delta'] = {'protocol':APPROVAL_DATE_PROTOCOL, 'revision':APPROVAL_DATE_REVISION,

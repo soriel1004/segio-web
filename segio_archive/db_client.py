@@ -149,7 +149,7 @@ def unpack_verified(source: Path, destination: Path, username: str, checkpoint=l
                 raise CollectionError("ZIP에 중복 경로나 지원하지 않는 파일 형식이 있습니다.")
             names.add(folded)
             by_name[member.filename] = member
-        if 'manifest.json' not in by_name or by_name['manifest.json'].file_size>16*1024*1024:
+        if 'manifest.json' not in by_name:
             raise CollectionError("정상적인 DB 보관함 manifest.json이 없습니다.")
         manifest_bytes = archive.read('manifest.json')
         manifest = json.loads(manifest_bytes)

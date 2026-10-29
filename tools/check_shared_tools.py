@@ -62,6 +62,8 @@ def load_bundle(directory):
         raise BundleError('Unsupported date-selected mail revision.')
     if any(b'draft-time-merge-1' not in contents[name] for name in ('export_approval_db.py','live_archive_bridge.php')):
         raise BundleError('Unsupported date-selected approval revision.')
+    if b'metadata-size-unlimited-1' not in contents['live_export_worker.py']:
+        raise BundleError('Unsupported backup metadata revision.')
     return contents
 
 
@@ -84,6 +86,7 @@ def main():
     print('Incremental mail revision: mail-hash-delta-1; cancellation cleanup: cancel-discard-1.')
     print('Date-selected mail revision: file-time-merge-1.')
     print('Date-selected approval revision: draft-time-merge-1.')
+    print('Backup metadata revision: metadata-size-unlimited-1; no fixed manifest size limit.')
     print('No server configuration, credentials, permissions or jobs changed.')
     print('This is a local bundle check, not a server login or DB connectivity test.')
     return 0
