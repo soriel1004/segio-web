@@ -16,7 +16,7 @@ BODY_KINDS = {'empty','login_form','php_source','php_error','html','json_like','
 PHASES = {'시작','브라우저 시작','SEGIO 로그인','서버 연결 기능 확인','서버 로그인 확인',
           '서버 추출 요청','서버 추출 상태 확인','서버 연결','다운로드 저장 폴더 준비',
           '보관 ZIP 다운로드','내려받은 파일 검증','Windows DB·메일 검색 색인 생성',
-          '이전 백업 확인','기존 백업 반영 준비','PC 백업 삭제'}
+          '이전 백업 확인','기존 백업 반영 준비','PC 백업 삭제','PC 삭제 관리 연결'}
 ERROR_CODES = {'BRIDGE_NOT_JSON','BRIDGE_INVALID_JSON','BRIDGE_RESPONSE_TOO_LARGE',
                'service_not_configured','job_not_found','BRIDGE_STATUS_NOT_FOUND','invalid_baseline','invalid_approval_since',
                'BRIDGE_NOT_INSTALLED','BRIDGE_LOGIN_REQUIRED','BRIDGE_PHP_SOURCE',
@@ -53,6 +53,7 @@ PROCESSING_SITES = {
     'incremental':{'__init__','raw_path'},
     'file_ops':{'replace_file','remove_file','retry_file_io','merge_io'},
     'local_delete':{'run','seal','catalog_items','mail_key'},
+    'native_archive':{'run_url','signal_path','publish_signal'},
 }
 
 

@@ -10,7 +10,7 @@ from .archive import atomic_write
 from .mail_folders import MailFolders
 from .index_metadata import IndexMetadata, CATEGORIES, item_date
 
-VERSION = 'offline-search/9'
+VERSION = 'offline-search/10'
 CHUNK_SIZE = 500
 
 
@@ -79,7 +79,9 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
                 report('search',done,total,unit='messages')
     warning_count=manifest.get('portable_mail',{}).get('warning_count',0)
     from .delete_page import SCRIPT
+    from .delete_bridge import START_PAGE
     write('search/delete.js',SCRIPT)
+    write('search/manage.html',START_PAGE)
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes,
               'edit_revision':uuid.uuid4().hex,
               'mail_warning_count':warning_count if type(warning_count) is int and warning_count>=0 else 0,
