@@ -4,12 +4,13 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import uuid
 
 from .archive import atomic_write
 from .mail_folders import MailFolders
 from .index_metadata import IndexMetadata, CATEGORIES, item_date
 
-VERSION = 'offline-search/8'
+VERSION = 'offline-search/9'
 CHUNK_SIZE = 500
 
 
@@ -24,7 +25,8 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
     existing = manifest is None
     if existing:
         manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-        if (manifest.get('browser_index') == VERSION and manifest.get('browser_status_map',{})==manifest.get('approval_status_map',{}) and
+        if (manifest.get('browser_index') == VERSION and isinstance(manifest.get('browser_edit_revision'),str) and
+                (root/'search/config.json').is_file() and manifest.get('browser_status_map',{})==manifest.get('approval_status_map',{}) and
                 all((root/name).is_file() for name in manifest['files'] if name.startswith('search/'))):
             return manifest
         expected = manifest['files'].get('index.html')
@@ -76,13 +78,18 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
                 done+=len(rows)
                 report('search',done,total,unit='messages')
     warning_count=manifest.get('portable_mail',{}).get('warning_count',0)
+    from .delete_page import SCRIPT
+    write('search/delete.js',SCRIPT)
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes,
+              'edit_revision':uuid.uuid4().hex,
               'mail_warning_count':warning_count if type(warning_count) is int and warning_count>=0 else 0,
               'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
+    write('search/config.json',json.dumps(config,ensure_ascii=False))
     if manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1':
         manifest['viewer']='local-db/1'
     manifest['browser_index'] = VERSION
+    manifest['browser_edit_revision']=config['edit_revision']
     manifest['browser_status_map']=manifest.get('approval_status_map',{})
     atomic_write(root/'manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'))
     return manifest
@@ -98,6 +105,7 @@ h1{font-size:20px}h2{font-size:14px;margin:0}input,button,select{font:inherit;bo
 #search-form{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}#q{flex:1;min-width:160px;padding:10px;border:1px solid #a4b1c2;border-radius:5px}#scope{padding:8px;border:1px solid #a4b1c2;border-radius:5px;background:white}#search-button,[role=tab][aria-selected=true]{background:#075b9c;color:white;border-color:#075b9c}
 #list-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:12px 0}#list-toolbar #summary{margin:0}#page-size-form,#custom-page-size:not([hidden]){display:flex;align-items:center;gap:8px;flex-wrap:wrap}#page-size,#page-size-input{padding:6px 8px;border:1px solid #a4b1c2;border-radius:5px;background:white}#page-size-input{width:90px}#custom-page-size[hidden]{display:none}#page-size-form button{padding:6px 12px}#page-size-help{color:#526176}
 [role=tablist]{display:flex;gap:8px;border-bottom:2px solid #075b9c;padding-bottom:8px}#mail-folders,#approval-folders{background:white;border:1px solid #d8e0e9;border-radius:6px;padding:12px;margin:12px 0}.box-list{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow:auto}.box-list button{padding:6px 12px}.box-list button[aria-pressed=true]{background:#075b9c;color:white;border-color:#075b9c}#custom-mailboxes h2{font-size:12px;margin:12px 0 6px}#list-head{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:8px 12px;font-weight:bold}#summary{margin:12px 0}#results{background:white;border:1px solid #d8e0e9;border-radius:6px}article{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%);gap:10px;padding:12px;border-bottom:1px solid #e3e8ef;align-items:center}article:last-child{border-bottom:0}article:hover,article:focus-within{background:#eaf3ff}article h2 a{text-decoration:none;display:block}article h2 a:focus-visible{outline:2px solid #075b9c;outline-offset:3px}article h2{font-size:12px;font-weight:normal;overflow-wrap:anywhere}article p{margin:0;overflow-wrap:anywhere;color:#526176}a{color:#075b9c}#notice{color:#76551b}#pagination{display:flex;gap:14px;align-items:center;margin-top:16px}#empty{padding:20px}@media(max-width:600px){article{grid-template-columns:35px minmax(0,1fr)}article p{grid-column:2}}
+#delete-button{margin-left:auto;background:#a22626;color:white;border-color:#a22626}#selection-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}#selection-toolbar button{padding:6px 12px}#list-head,article{grid-template-columns:26px 42px minmax(0,1fr) minmax(100px,20%) minmax(150px,22%)}input.item-select,#select-page{width:17px;height:17px}dialog{max-width:580px;width:calc(100% - 60px);border:1px solid #a4b1c2;border-radius:8px;padding:24px}dialog::backdrop{background:#172b4380}#delete-meter{width:100%;margin:10px 0}#delete-confirm{background:#a22626;color:white}article:has(.item-select:checked){background:#eaf3ff}@media(max-width:600px){article{grid-template-columns:26px 35px minmax(0,1fr)}article p,article time{grid-column:3}}
 </style>
 <h1>그룹웨어 문서 및 메일 백업 및 검색</h1>
 <p>메일 제목·보낸 사람·받는 사람과 결재 내용을 검색합니다. 페이지당 표시 수를 선택하거나 직접 입력할 수 있습니다.</p>
@@ -118,11 +126,14 @@ if(!config.approval_categories.some(item=>item.id===category))category='';
 const $=selector=>document.querySelector(selector);
 function locationHash(){location.hash=(kind||'all')+(kind==='mail'&&mailbox?'&'+new URLSearchParams({box:mailbox}):kind==='approval'&&category?'&'+new URLSearchParams({category}):'')}
 function mailboxButton(parent,id,label,count){const button=document.createElement('button');button.type='button';button.dataset.mailbox=id;button.textContent=label+' ('+count.toLocaleString()+'건)';button.onclick=()=>{mailbox=id;page=0;locationHash();load()};parent.append(button)}
+function refreshBoxes(){$('#base-mailboxes').replaceChildren();$('#custom-mailboxes .box-list').replaceChildren();$('#approval-folders .box-list').replaceChildren();
 mailboxButton($('#base-mailboxes'),'','전체 메일',config.counts.mail);
 for(const box of config.mailboxes){mailboxButton(box.category==='custom'?$('#custom-mailboxes .box-list'):$('#base-mailboxes'),box.id,box.label,box.count)}
 $('#custom-mailboxes').hidden=!config.mailboxes.some(box=>box.category==='custom');
 function approvalButton(id,label,count){const button=document.createElement('button');button.type='button';button.dataset.category=id;button.textContent=label+' ('+count.toLocaleString()+'건)';button.onclick=()=>{category=id;page=0;locationHash();load()};$('#approval-folders .box-list').append(button)}
 approvalButton('','전체 결재',config.counts.approval);for(const item of config.approval_categories)approvalButton(item.id,item.label,item.count);
+}
+refreshBoxes();
 function tabs(){
 $('#mail-folders').hidden=kind!=='mail';$('#approval-folders').hidden=kind!=='approval';
 for(const button of document.querySelectorAll('[data-category]'))button.setAttribute('aria-pressed',String(button.dataset.category===category));
@@ -134,7 +145,7 @@ for(const key of ['all','approval','mail']){const count=key==='all'?config.count
 $('#results').setAttribute('aria-labelledby','tab-'+(kind||'all'))}
 function readChunk(name){return new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=name;script.onload=()=>{const rows=window.archiveChunk;delete window.archiveChunk;script.remove();Array.isArray(rows)?resolve(rows):reject(Error('색인 형식'))};script.onerror=()=>{script.remove();reject(Error('색인 파일'))};document.head.append(script)})}
 async function offlineSearch(seq){let total=0,items=[];const needle=query.toLowerCase();for(const name of config.chunks){if(seq!==sequence)return null;const rows=await readChunk(name);for(const row of rows){if((kind&&row[1]!==kind)||(kind==='mail'&&mailbox&&row[6]!==mailbox)||(kind==='approval'&&category&&!row[10].includes(category))||![row[2],row[3],row[5],row[7]].some(value=>String(value||'').toLowerCase().includes(needle)))continue;if(total>=page*pageSize&&items.length<pageSize)items.push({id:row[0],kind:row[1],title:row[2],folder:row[3],html:row[4],detail:row[5],folder_id:row[6],source_folder:row[7],date:row[8],date_raw:row[9],categories:row[10]});total++}if(!needle&&items.length===pageSize){total=kind==='mail'&&mailbox?config.mailboxes.find(box=>box.id===mailbox).count:kind==='approval'&&category?config.approval_categories.find(item=>item.id===category).count:kind?config.counts[kind]:config.counts.approval+config.counts.mail;break}}return {total,items}}
-function render(data){$('#summary').textContent=labels[kind||'all']+' '+data.total.toLocaleString()+'건'+(kind==='mail'&&mailbox?' · '+config.mailboxes.find(box=>box.id===mailbox).label:'')+(kind==='approval'&&category?' · '+config.approval_categories.find(item=>item.id===category).label:'')+(query?' · 검색어: '+query:' · 전체 백업 목록');$('#page').textContent=(page+1)+' / '+Math.max(1,Math.ceil(data.total/pageSize));$('#prev').disabled=page===0;$('#next').disabled=(page+1)*pageSize>=data.total;const out=$('#results');out.replaceChildren();if(!data.items.length){const empty=document.createElement('p');empty.id='empty';empty.textContent=query?'검색 결과가 없습니다.':'이 종류의 백업 자료가 없습니다.';out.append(empty)}for(const [index,item] of data.items.entries()){const row=document.createElement('article'),number=document.createElement('span'),heading=document.createElement('h2'),link=document.createElement('a'),folder=document.createElement('p'),date=document.createElement('time');number.textContent=String(page*pageSize+index+1);link.textContent=item.title||'제목 없음';link.href=String(item.html||'').split('/').map(encodeURIComponent).join('/');heading.append(link);folder.textContent=item.folder;folder.className='mailbox-name';folder.title=item.source_folder||item.folder;date.className='message-date';date.textContent=item.date||'';date.title=item.date_raw||item.date||'';row.append(number,heading,folder,date);out.append(row)}}
+function render(data){$('#summary').textContent=labels[kind||'all']+' '+data.total.toLocaleString()+'건'+(kind==='mail'&&mailbox?' · '+config.mailboxes.find(box=>box.id===mailbox).label:'')+(kind==='approval'&&category?' · '+config.approval_categories.find(item=>item.id===category).label:'')+(query?' · 검색어: '+query:' · 전체 백업 목록');$('#page').textContent=(page+1)+' / '+Math.max(1,Math.ceil(data.total/pageSize));$('#prev').disabled=page===0;$('#next').disabled=(page+1)*pageSize>=data.total;const out=$('#results');out.replaceChildren();if(!data.items.length){const empty=document.createElement('p');empty.id='empty';empty.textContent=query?'검색 결과가 없습니다.':'이 종류의 백업 자료가 없습니다.';out.append(empty)}for(const [index,item] of data.items.entries()){const row=document.createElement('article'),number=document.createElement('span'),heading=document.createElement('h2'),link=document.createElement('a'),folder=document.createElement('p'),date=document.createElement('time');row.dataset.identity=item.id;row.dataset.kind=item.kind;number.textContent=String(page*pageSize+index+1);link.textContent=item.title||'제목 없음';link.href=String(item.html||'').split('/').map(encodeURIComponent).join('/');heading.append(link);folder.textContent=item.folder;folder.className='mailbox-name';folder.title=item.source_folder||item.folder;date.className='message-date';date.textContent=item.date||'';date.title=item.date_raw||item.date||'';row.append(number,heading,folder,date);out.append(row)}window.archiveLastResults=data;if(window.archiveSelectionRendered)window.archiveSelectionRendered(data)}
 function load(){const seq=++sequence;tabs();$('#results').replaceChildren();$('#summary').textContent='목록을 불러오는 중…';$('#prev').disabled=$('#next').disabled=true;pending=pending.catch(()=>{}).then(async()=>{if(seq!==sequence)return;try{let data;if(offline){data=await offlineSearch(seq)}else{const response=await fetch('api/search?'+new URLSearchParams({q:query,kind,page,page_size:pageSize,mailbox:kind==='mail'?mailbox:'',category:kind==='approval'?category:''}));if(!response.ok)throw Error('검색 응답');data=await response.json()}if(seq!==sequence||!data)return;render(data)}catch(error){if(seq!==sequence)return;$('#summary').textContent='목록을 불러오지 못했습니다.';$('#results').replaceChildren();$('#notice').textContent='백업 폴더의 search 폴더를 함께 보관하세요. Windows 프로그램의 보관함 열기로 열면 검색 화면을 갱신할 수 있습니다.'}})}
 function chooseScope(value){kind=value;mailbox=category='';page=0;locationHash();load()}
 $('#search-form').onsubmit=event=>{event.preventDefault();query=q.value.trim().slice(0,200);if(kind!==$('#scope').value){mailbox=category=''}kind=$('#scope').value;page=0;locationHash();load()};
@@ -144,4 +155,4 @@ function applyPageSize(value){pageSize=value;page=0;load()}
 $('#page-size').onchange=()=>{const custom=$('#page-size').value==='custom';$('#custom-page-size').hidden=!custom;$('#page-size-input').disabled=!custom;if(custom){$('#page-size-input').value=pageSize;$('#page-size-input').focus();$('#page-size-input').select()}else{applyPageSize(Number($('#page-size').value))}};
 $('#page-size-form').onsubmit=event=>{event.preventDefault();if($('#page-size').value!=='custom')return;const input=$('#page-size-input');if(!input.reportValidity())return;const value=input.valueAsNumber;if(Number.isInteger(value)&&value>=1&&value<=1000)applyPageSize(value)};
 $('#prev').onclick=()=>{if(page>0){page--;load()}};$('#next').onclick=()=>{page++;load()};$('#notice').textContent='백업 폴더에서 결재·메일 본문·첨부를 바로 열 수 있습니다. 폴더 전체를 함께 보관하세요.';if(config.mail_warning_count){$('#notice').append(document.createTextNode(' 메일 '+config.mail_warning_count+'건은 변환·첨부 확인이 필요합니다. '));const report=document.createElement('a');report.href='mail/processing-issues.html';report.textContent='확인 필요 메일 목록';$('#notice').append(report)}load();
-</script></html>'''
+</script><script src="search/delete.js"></script></html>'''

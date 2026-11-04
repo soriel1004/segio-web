@@ -88,6 +88,11 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     with closing(sqlite3.connect(temporary)) as db:
         db.execute('PRAGMA temp_store=FILE')
         db.execute('PRAGMA cache_size=-8192')
+        from .local_delete import load_tombstones, removed, approval_key, mail_removed, file_folder
+        load_tombstones(root,db,files)
+        db.execute('CREATE TEMP TABLE archive_removed_prefix(prefix TEXT PRIMARY KEY)')
+        db.execute('CREATE TEMP TABLE archive_removed_sources(source TEXT PRIMARY KEY)')
+        deleted_mail=bool(db.execute("SELECT 1 FROM archive_deleted WHERE kind='mail' LIMIT 1").fetchone())
         if changed_sources is None:
             db.execute('CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, folders TEXT, body TEXT, html TEXT)')
             db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
@@ -120,9 +125,21 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                     files.pop(name)
             mail_count = db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
         catalog = json.loads((root/'catalog.json').read_text(encoding='utf-8'))
+        retained_catalog=[]
         report('approval_index',0,len(catalog['items']),unit='messages')
         for number,item in enumerate(catalog['items'],1):
             checkpoint()
+            if removed(db,'approval',approval_key('approval-'+item['id'])):
+                prefix='documents/'+item['id']+'/'
+                if (re.fullmatch(r'[A-Za-z0-9_-]+',item['id']) and
+                        item['path'].startswith(prefix) and item['json'].startswith(prefix)):
+                    directory=root/prefix
+                    if directory.resolve().is_relative_to(root) and directory.is_dir():
+                        import shutil
+                        shutil.rmtree(directory)
+                    db.execute('INSERT OR IGNORE INTO archive_removed_prefix VALUES (?)',(prefix,))
+                continue
+            retained_catalog.append(item)
             for name in (item['path'], item['json']):
                 safe_member(name)
                 if name not in files:
@@ -132,6 +149,13 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             db.execute('INSERT INTO document_records VALUES (?,?)',
                        ('approval-'+item['id'], (root/item['json']).read_text(encoding='utf-8')))
             report('approval_index',number,len(catalog['items']),unit='messages')
+        if len(retained_catalog)!=len(catalog['items']):
+            from .archive import atomic_write
+            atomic_write(root/'catalog.json',json.dumps({'items':retained_catalog},ensure_ascii=False).encode('utf-8'))
+            files['catalog.json']=digest_file(root/'catalog.json',checkpoint)
+            for name in list(files):
+                if db.execute('SELECT 1 FROM archive_removed_prefix WHERE prefix=?',(file_folder(name),)).fetchone():files.pop(name)
+        manifest['counts']['approval']=len(retained_catalog)
         report('index',0,total_bytes,messages=0)
         for source in sources['sources']:
             checkpoint()
@@ -158,6 +182,9 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             with path.open('rb') as stream, (closing(spans) if hasattr(spans,'close') else nullcontext()):
                 for start, end in spans:
                     checkpoint()
+                    if deleted_mail and mail_removed(db,stream,source['name_bytes_hex'],start,end):
+                        if source.get('format')=='rfc822':db.execute('INSERT OR IGNORE INTO archive_removed_sources VALUES (?)',(name,))
+                        continue
                     message = read_headers(stream, start, end)
                     title = header_text(message.get('Subject')) or '제목 없음'
                     sender, receiver, date = (header_text(message.get(key)) for key in ('From', 'To', 'Date'))
@@ -176,6 +203,18 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                         log(f'메일 제목 색인 {mail_count:,}건')
             indexed_bytes += source['bytes']
             report('index', indexed_bytes, total_bytes,messages=mail_count)
+        if db.execute('SELECT 1 FROM archive_removed_sources LIMIT 1').fetchone():
+            kept=[]
+            for source in sources['sources']:
+                if db.execute('SELECT 1 FROM archive_removed_sources WHERE source=?',(source['path'],)).fetchone():
+                    (root/source['path']).unlink()
+                    files.pop(source['path'],None)
+                else:kept.append(source)
+            sources['sources']=kept
+            from .archive import atomic_write
+            atomic_write(root/'mail/sources.json',json.dumps(sources,ensure_ascii=False).encode('utf-8'))
+            files['mail/sources.json']=digest_file(root/'mail/sources.json',checkpoint)
+            manifest['counts']['mail_files']=len(kept)
         report('index_finalize')
         db.execute('CREATE INDEX IF NOT EXISTS title_index ON items(kind,title)')
         db.execute('CREATE INDEX IF NOT EXISTS mail_source_index ON mail_records(source)')
@@ -204,29 +243,35 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint,progress)
 
 
+def search_filter(root, db, query='', kind='', mailbox='', category=''):
+    """One SQL predicate for displayed results and bulk selection."""
+    from .mail_folders import MailFolders
+    from .index_metadata import IndexMetadata, CATEGORIES
+    query=query[:200].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
+    parameters=['%'+query+'%']*4
+    MailFolders(root).register(db)
+    meta=IndexMetadata(root,db)
+    label="CASE WHEN i.kind='mail' THEN mailbox_label(i.folders) ELSE approval_label("+meta.payload_sql+") END"
+    where=r"(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR i.folders LIKE ? ESCAPE '\' OR "+label+r" LIKE ? ESCAPE '\')"
+    if kind in ('mail','approval'):
+        where+=' AND i.kind=?'
+        parameters.append(kind)
+    if mailbox and kind!='approval':
+        where+=" AND i.kind='mail' AND mailbox_key(i.folders)=?"
+        parameters.append(mailbox)
+    if category and kind!='mail':
+        where+=" AND i.kind='approval' AND approval_has("+meta.payload_sql+",?)=1"
+        parameters.append(category)
+    return ' FROM items i '+meta.joins+' WHERE '+where,parameters,meta,label
+
+
 def search(root: Path, query='', kind='', page=0, mailbox='', category='', page_size=100):
     from .mail_folders import MailFolders
     from .index_metadata import IndexMetadata, CATEGORIES, item_date
     if not isinstance(page_size, int) or not 1 <= page_size <= 1000:
         raise ValueError('페이지당 표시 수는 1~1,000 사이의 정수여야 합니다.')
-    query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-    pattern = '%'+query+'%'
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
-        MailFolders(root).register(db)
-        meta = IndexMetadata(root,db)
-        folder_label="CASE WHEN i.kind='mail' THEN mailbox_label(i.folders) ELSE approval_label("+meta.payload_sql+") END"
-        where = r"(i.title LIKE ? ESCAPE '\' OR i.body LIKE ? ESCAPE '\' OR i.folders LIKE ? ESCAPE '\' OR "+folder_label+r" LIKE ? ESCAPE '\')"
-        parameters = [pattern]*4
-        if kind in ('mail', 'approval'):
-            where += ' AND i.kind=?'
-            parameters.append(kind)
-        if mailbox and kind!='approval':
-            where+=" AND i.kind='mail' AND mailbox_key(i.folders)=?"
-            parameters.append(mailbox)
-        if category and kind!='mail':
-            where += " AND i.kind='approval' AND approval_has("+meta.payload_sql+",?)=1"
-            parameters.append(category)
-        origin = ' FROM items i '+meta.joins+' WHERE '+where
+        origin,parameters,meta,folder_label=search_filter(root,db,query,kind,mailbox,category)
         total = db.execute('SELECT count(*)'+origin, parameters).fetchone()[0]
         fields = 'i.id,i.kind,i.title,'+folder_label+",i.html,CASE WHEN i.kind='mail' THEN mailbox_key(i.folders) ELSE '' END,i.folders,"
         rows = db.execute('SELECT '+fields+meta.date_sql+','+meta.payload_sql+origin+

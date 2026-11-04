@@ -63,12 +63,14 @@ class App(tk.Tk):
         from .window_control import minimize_console
         self._console_job=self.after_idle(minimize_console)
         self._startup_job=self.after_idle(self.notify_startup_ready)
+        from .native_archive import register
+        register()
 
     def build(self):
         panel = ttk.Frame(self, padding=24)
         panel.pack(fill="both", expand=True)
         ttk.Label(panel, text=APP_TITLE, font=("Malgun Gothic", 18, "bold")).pack(anchor="w")
-        ttk.Label(panel, text="서버의 원본을 보존하며 Windows에 백업합니다. 계정·문서·메일을 삭제하지 않습니다.", wraplength=770).pack(anchor="w", pady=(6, 10))
+        ttk.Label(panel, text="서버 원본을 보존하며 Windows에 백업합니다. 보관함에서는 PC 백업의 항목을 선택해 삭제할 수 있습니다.", wraplength=770).pack(anchor="w", pady=(6, 10))
         ttk.Label(panel, text="그룹웨어 ID·암호로 로그인해 본인의 결재 문서와 메일을 내려받습니다.", wraplength=800).pack(anchor='w', pady=(0, 6))
         self.forms = ttk.Frame(panel)
         self.forms.pack(fill='x')
@@ -497,6 +499,9 @@ class App(tk.Tk):
             messagebox.showerror("검증 실패", "manifest.json과 보관 파일을 확인하세요.")
 
     def close(self):
+        if self.viewer and self.viewer.edit_running:
+            messagebox.showinfo('삭제 진행 중','인덱스 화면에서 삭제 완료를 확인한 뒤 프로그램을 종료하세요.')
+            return
         if self.running:
             messagebox.showinfo("수집 중", "‘중단’을 누르고 현재 요청이 끝난 뒤 창을 닫아주세요.")
             return

@@ -1,4 +1,4 @@
-from segio_archive.gui import main
+from segio_archive.__main__ import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

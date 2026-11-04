@@ -10,6 +10,8 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="SEGIO 결재 문서·메일 오프라인 보관")
     sub = parser.add_subparsers(dest="command")
+    native=sub.add_parser('manage-url',help=argparse.SUPPRESS)
+    native.add_argument('url')
     collect = sub.add_parser("collect", help="서버에서 문서와 메일 수집")
     collect.add_argument("--server", required=True)
     collect.add_argument("--user", required=True)
@@ -52,6 +54,18 @@ def main():
     prepare=sub.add_parser('prepare-offline',help='기존 SSH 백업의 메일 본문·첨부를 index.html 바로보기로 변환')
     prepare.add_argument('folder',type=Path)
     args = parser.parse_args()
+    if args.command=='manage-url':
+        from .native_archive import run_url
+        try:
+            run_url(args.url)
+            return 0
+        except Exception as exc:
+            import tkinter as tk
+            from tkinter import messagebox
+            root=tk.Tk();root.withdraw()
+            try:messagebox.showerror('PC 백업 관리 연결',str(exc) if isinstance(exc,ValueError) else '백업 폴더의 완료 상태와 접근 권한을 확인하세요.')
+            finally:root.destroy()
+            return 2
     if args.command=='prepare-offline':
         from .portable_mail import prepare_archive
         prepare_archive(args.folder,log=print)
