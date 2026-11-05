@@ -53,6 +53,8 @@ PROCESSING_SITES = {
     'incremental':{'__init__','raw_path'},
     'file_ops':{'replace_file','remove_file','retry_file_io','merge_io'},
     'local_delete':{'run','seal','catalog_items','mail_key'},
+    'delete_index':{'verified','save','update_search','update_mail'},
+    'delete_transaction':{'commit','recover','target','write_record'},
     'native_archive':{'run_url','signal_path','publish_signal'},
 }
 

@@ -1,5 +1,5 @@
 """Portable archive list/search, including file:// without fetching SQLite."""
-from contextlib import closing
+from contextlib import closing,contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -10,8 +10,33 @@ from .archive import atomic_write
 from .mail_folders import MailFolders
 from .index_metadata import IndexMetadata, CATEGORIES, item_date
 
-VERSION = 'offline-search/10'
+VERSION = 'offline-search/11'
 CHUNK_SIZE = 500
+
+# No saved absolute paths, script-policy overrides, or elevated permissions.
+# Windows ShellExecute opens the per-user handler directly, so the browser's
+# external-program prompt is not part of selecting/deleting items.
+WINDOWS_LAUNCHER=r'''@echo off
+chcp 65001 >nul
+pushd "%~dp0"
+powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -Command "$ErrorActionPreference='Stop'; try { $archiveUri=([System.Uri](Join-Path (Get-Location).Path 'index.html')).AbsoluteUri; Start-Process -FilePath ('segio-backup://view?archive='+[System.Uri]::EscapeDataString($archiveUri)) } catch { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('새 SEGIO 백업 프로그램을 한 번 실행한 후 index.bat를 다시 실행하세요.','SEGIO 보관함') | Out-Null; exit 1 }"
+popd
+'''
+
+
+@contextmanager
+def chunk_map(root):
+    directory=root/'search'
+    directory.mkdir(parents=True,exist_ok=True)
+    temporary=directory/('.parts-'+uuid.uuid4().hex+'.sqlite3')
+    try:
+        with closing(sqlite3.connect(temporary)) as db:
+            db.execute('CREATE TABLE parts(id TEXT PRIMARY KEY,chunk TEXT NOT NULL)')
+            yield db
+            db.commit()
+        from .file_ops import replace_file
+        replace_file(temporary,directory/'parts.sqlite3')
+    finally:temporary.unlink(missing_ok=True)
 
 
 def script_json(value):
@@ -46,7 +71,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
     folders=MailFolders(root)
     report=progress or (lambda *args,**kwargs:None)
     approval_counts={key:0 for key in CATEGORIES}
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+    with chunk_map(root) as mapping, closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
         boxes=folders.boxes(db)
         meta=IndexMetadata(root,db,manifest)
         for kind, count in db.execute('SELECT kind,count(*) FROM items GROUP BY kind'):
@@ -60,6 +85,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
             while rows := cursor.fetchmany(CHUNK_SIZE):
                 checkpoint()
                 name = f'search/part-{len(chunks):06d}.js'
+                mapping.executemany('INSERT INTO parts VALUES (?,?)',((row[0],name) for row in rows))
                 packed=[]
                 for identity,kind,title,folder,link,body,date_raw,payload in rows:
                     categories=meta.categories(payload) if kind=='approval' else []
@@ -77,6 +103,8 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
                 chunks.append(name)
                 done+=len(rows)
                 report('search',done,total,unit='messages')
+    from .compact_mail import digest_file
+    files['search/parts.sqlite3']=digest_file(root/'search/parts.sqlite3',checkpoint)
     warning_count=manifest.get('portable_mail',{}).get('warning_count',0)
     from .delete_page import SCRIPT
     from .delete_bridge import START_PAGE
@@ -87,6 +115,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
               'mail_warning_count':warning_count if type(warning_count) is int and warning_count>=0 else 0,
               'approval_categories':[{'id':key,'label':label,'count':approval_counts[key]} for key,label in CATEGORIES.items()]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
+    write('index.bat',WINDOWS_LAUNCHER.replace('\n','\r\n'))
     write('search/config.json',json.dumps(config,ensure_ascii=False))
     if manifest.get('format')=='segio-db-html/1' and manifest.get('viewer')!='sqlite-mail/1':
         manifest['viewer']='local-db/1'

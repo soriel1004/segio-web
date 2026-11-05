@@ -437,11 +437,20 @@ class App(tk.Tk):
             return
         path = self.select_archive()
         if path:
+            try:
+                from .delete_transaction import journal_path,recover
+                if journal_path(path).exists():
+                    from .date_incremental import update_lock
+                    with update_lock(path):recover(path)
+            except Exception as exc:
+                messagebox.showerror('보관함 복구 확인',str(exc))
+                return
             if (path / "index.html").is_file():
                 from .viewer import Viewer
                 try:
                     manifest=json.loads((path/'manifest.json').read_text(encoding='utf-8'))
-                    if (manifest.get('viewer')=='sqlite-mail/1' or
+                    from .portable_mail import VERSION as portable_version
+                    if ((manifest.get('viewer')=='sqlite-mail/1' and manifest.get('portable_mail',{}).get('version')!=portable_version) or
                             manifest.get('local_processing',{}).get('state')=='pending'):
                         self.local_conversion=True
                         self.running=True

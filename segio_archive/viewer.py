@@ -17,6 +17,10 @@ class Viewer:
     def __init__(self, folder: Path, *, bridge_token=None, port=0, bridge=False):
         if bridge_token is not None and not re.fullmatch('[a-f0-9]{64}',bridge_token):raise ValueError('PC 관리 연결 토큰이 올바르지 않습니다.')
         self.folder = folder.resolve()
+        from .delete_transaction import journal_path,recover
+        if journal_path(self.folder).exists():
+            from .date_incremental import update_lock
+            with update_lock(self.folder):recover(self.folder)
         if not (self.folder / "index.html").is_file():
             raise ValueError("보관함 index.html이 없습니다.")
         self.edit_enabled=False

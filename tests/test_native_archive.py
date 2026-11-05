@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,Mock
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -51,6 +51,23 @@ class NativeStartupTests(unittest.TestCase):
 
     def uri(self,token):
         return 'segio-backup://open?'+urlencode({'archive':(self.root/'index.html').as_uri(),'token':token,'port':0})
+
+    def test_windows_index_view_opens_the_managed_index_without_authorizing_a_delete(self):
+        uri='segio-backup://view?'+urlencode({'archive':(self.root/'index.html').as_uri()})
+        view=SimpleNamespace(url='http://127.0.0.1:50001/PRIVATE/index.html',last_activity=-10**12,edit_running=False,
+            close=Mock(),edits=SimpleNamespace(start=Mock()))
+        with patch('segio_archive.viewer.Viewer',return_value=view) as created,patch('webbrowser.open',return_value=True) as opened:
+            native_archive.run_url(uri)
+        created.assert_called_once_with(self.root)
+        opened.assert_called_once_with(view.url)
+        view.edits.start.assert_not_called()
+        view.close.assert_called_once()
+
+    def test_view_entry_rejects_network_sources_and_deletion_flags(self):
+        fields={'archive':(self.root/'index.html').as_uri()}
+        for extra in ({'delete':'all'},{'archive':'file://remote.invalid/share/index.html'}):
+            with self.subTest(extra=extra),self.assertRaises(ValueError):
+                native_archive.parse_view_url('segio-backup://view?'+urlencode(dict(fields,**extra)))
 
     def signal(self,path):
         value=path.read_text(encoding='utf-8')

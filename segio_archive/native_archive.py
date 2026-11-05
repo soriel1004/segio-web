@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.parse import urlsplit,parse_qs,unquote
+from urllib.parse import urlsplit,parse_qs,unquote,urlencode
 
 SCHEME='segio-backup'
 
@@ -54,6 +54,10 @@ def parse_url(value):
         path=path[1:]
     folder=Path(path).parent.resolve()
     if Path(path).name.lower()!='index.html':raise ValueError('백업 index.html을 선택하세요.')
+    from .delete_transaction import journal_path,recover
+    if journal_path(folder).exists():
+        from .date_incremental import update_lock
+        with update_lock(folder):recover(folder)
     manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('format')!='segio-db-html/1' or not isinstance(manifest.get('live_export'),dict):
         raise ValueError('개인 로그인으로 완료한 백업만 관리할 수 있습니다.')
@@ -81,7 +85,29 @@ def publish_signal(path,token,state,**fields):
         if os.path.exists(temporary):os.unlink(temporary)
 
 
+def parse_view_url(value):
+    parsed=urlsplit(value)
+    fields=parse_qs(parsed.query,strict_parsing=True)
+    if (parsed.scheme!=SCHEME or parsed.netloc!='view' or parsed.path not in ('','/') or parsed.fragment or
+            set(fields)!={'archive'} or len(fields['archive'])!=1):
+        raise ValueError('보관함 실행 주소가 올바르지 않습니다.')
+    folder,_,_=parse_url(SCHEME+'://open?'+urlencode({'archive':fields['archive'][0],'token':secrets.token_hex(32),'port':0}))
+    return folder
+
+
+def run_view(value):
+    import webbrowser
+    from .viewer import Viewer
+    viewer=Viewer(parse_view_url(value))
+    try:
+        if not webbrowser.open(viewer.url):raise ValueError('보관함을 브라우저에서 열지 못했습니다. 프로그램의 보관함 열기를 사용하세요.')
+        while time.monotonic()-viewer.last_activity<1800 or viewer.edit_running:
+            threading.Event().wait(1)
+    finally:viewer.close()
+
+
 def run_url(value):
+    if urlsplit(value).netloc=='view':return run_view(value)
     folder,token,port=parse_url(value)
     signal=signal_path(folder,token)
     viewer=None

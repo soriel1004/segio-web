@@ -226,110 +226,102 @@ class DeletePlan:
 
     def run(self,progress=lambda *args:None,clean_files=True):
         if not self.sealed:raise ValueError('먼저 선택을 확인하세요.')
+        from .delete_transaction import commit,journal_path
+        from .delete_index import update_mail,update_search
         baseline=self.baseline
-        staging=None
+        stage=None
         warnings=[]
-        def log(message):
-            if '정리를 확인하지 못했습니다' in message:warnings.append('이전 백업 사본의 파일 정리를 확인하지 못했습니다.')
         with update_lock(self.root):
+            if journal_path(self.root).exists():raise CollectionError('이전 삭제 작업의 임시 파일 정리를 먼저 확인하세요. 보관함을 다시 열어 정리 상태를 확인하세요.')
             if digest_file(self.root/'manifest.json')!=self.signature:raise CollectionError('선택 확인 후 백업이 변경되었습니다. 목록을 새로 열어 확인하세요.')
-            staging=Path(tempfile.mkdtemp(prefix='.segio-delete-',dir=self.root.parent))
+            stage=Path(tempfile.mkdtemp(prefix='.segio-delete-',dir=self.root.parent))
+            prepared=stage/'new'
+            prepared.mkdir()
             try:
                 manifest=json.loads((self.root/'manifest.json').read_bytes())
-                files={}
+                original=baseline.manifest
+                files=manifest['files']
                 with closing(sqlite3.connect(self.path)) as plan:
                     plan.execute('PRAGMA temp_store=FILE')
                     plan.execute('PRAGMA cache_size=-8192')
-                    if clean_files and plan.execute('SELECT 1 FROM cleanup WHERE shared=1 LIMIT 1').fetchone():
-                        warnings.append('다른 항목이 함께 사용하는 문서 파일은 보존했습니다.')
-                    total=len(manifest['files'])
-                    for number,(name,expected) in enumerate(manifest['files'].items(),1):
-                        if name=='index.html' or name.startswith('search/'):continue
-                        if clean_files and plan.execute('SELECT 1 FROM raw_cleanup WHERE source=?',(name,)).fetchone():continue
-                        prefix=file_folder(name)
-                        if clean_files and prefix and plan.execute('SELECT 1 FROM cleanup WHERE prefix=? AND shared=0',(prefix,)).fetchone():continue
-                        source=baseline.raw_path(name)
-                        target=staging/name
+                    removed=[]
+                    if clean_files:
+                        if plan.execute('SELECT 1 FROM cleanup WHERE shared=1 LIMIT 1').fetchone():
+                            warnings.append('다른 항목이 함께 사용하는 문서 파일은 보존했습니다.')
+                        for name in list(files):
+                            if (plan.execute('SELECT 1 FROM raw_cleanup WHERE source=?',(name,)).fetchone() or
+                                    plan.execute('SELECT 1 FROM cleanup WHERE prefix=? AND shared=0',(file_folder(name),)).fetchone()):
+                                files.pop(name)
+                    def copy_metadata(name):
+                        target=prepared/name
                         target.parent.mkdir(parents=True,exist_ok=True)
-                        if name in ('catalog.sqlite3','catalog.json','mail/sources.json',TOMBSTONES):
-                            baseline.copy(source,target,expected,lambda:None,lambda *a,**k:None,relative=name)
-                        else:
-                            try:os.link(source,target)
-                            except FileNotFoundError:
-                                from .attachment_safety import attachment_name
-                                if attachment_name(name):continue
-                                raise
-                            except OSError as exc:
-                                if getattr(exc,'winerror',None) in (225,226) or exc.errno not in (errno.EXDEV,errno.EPERM,errno.EACCES,errno.ENOTSUP):raise
-                                baseline.copy(source,target,expected,lambda:None,lambda *a,**k:None,relative=name)
-                        files[name]=expected
-                        if number%200==0:progress('파일 준비',number,total)
-                    progress('목록 삭제',0,self.count)
-                    with (staging/TOMBSTONES).open('ab') as output:
-                        sources=json.loads((self.root/'mail/sources.json').read_bytes()).get('sources',[]) if (self.root/'mail/sources.json').is_file() else []
-                        names={item['path']:item['name_bytes_hex'] for item in sources}
-                        from .portable_mail import SourceReader
-                        with SourceReader() as opened:
-                            for number,(identity,kind,source,begin,end) in enumerate(plan.execute('SELECT id,kind,source,begin,end FROM selected ORDER BY kind,source,begin'),1):
-                                record={'protocol':PROTOCOL,'kind':kind}
-                                if kind=='approval':key=approval_key(identity)
-                                elif kind=='mail':
-                                    stream=opened.open(baseline.raw_path(source))
-                                    key=mail_key(stream,names[source],begin,end)
-                                    record['content']=message_digest(stream,begin,end,lambda done,total:progress('메일 원문 확인 ('+str(number)+'/'+str(self.count)+')',done,total))
-                                else:raise CollectionError('삭제할 자료 종류가 올바르지 않습니다.')
-                                record['key']=key
-                                output.write((json.dumps(record,separators=(',',':'))+'\n').encode('ascii'))
-                                if number%BATCH==0:progress('목록 삭제',number,self.count)
-                    catalog=staging/'catalog.json'
-                    temporary=catalog.with_suffix('.pending')
-                    with temporary.open('w',encoding='utf-8') as output:
-                        output.write('{"items":[')
-                        first=True
-                        for item in catalog_items(catalog):
-                            if plan.execute('SELECT 1 FROM selected WHERE id=?',('approval-'+item['id'],)).fetchone():continue
-                            if not first:output.write(',')
-                            first=False
-                            output.write(json.dumps(item,ensure_ascii=False,separators=(',',':')))
-                        output.write(']}')
-                    os.replace(temporary,catalog)
-                    if clean_files and (staging/'mail/sources.json').is_file():
-                        sources=json.loads((staging/'mail/sources.json').read_bytes())
+                        baseline.copy(baseline.raw_path(name),target,original['files'][name],lambda:None,lambda *a,**kw:None,relative=name)
+                    progress('삭제 자료 준비',0,self.count)
+                    copy_metadata('catalog.sqlite3')
+                    if plan.execute("SELECT 1 FROM selected WHERE kind='approval' LIMIT 1").fetchone():
+                        copy_metadata('catalog.json')
+                        catalog=prepared/'catalog.json'
+                        temporary=catalog.with_suffix('.pending')
+                        with temporary.open('w',encoding='utf-8') as output:
+                            output.write('{"items":[')
+                            first=True
+                            for item in catalog_items(catalog):
+                                if plan.execute('SELECT 1 FROM selected WHERE id=?',('approval-'+item['id'],)).fetchone():continue
+                                if not first:output.write(',')
+                                first=False
+                                output.write(json.dumps(item,ensure_ascii=False,separators=(',',':')))
+                            output.write(']}')
+                        os.replace(temporary,catalog)
+                    if TOMBSTONES in original['files']:copy_metadata(TOMBSTONES)
+                    elif (self.root/TOMBSTONES).exists():raise CollectionError('검증 목록에 없는 삭제 기록이 있습니다. 기존 파일을 확인하세요.')
+                    names={item['path']:item['name_bytes_hex'] for item in baseline.sources}
+                    from .portable_mail import SourceReader
+                    with (prepared/TOMBSTONES).open('ab') as output, SourceReader() as opened:
+                        for number,(identity,kind,source,begin,end) in enumerate(plan.execute('SELECT id,kind,source,begin,end FROM selected ORDER BY kind,source,begin'),1):
+                            record={'protocol':PROTOCOL,'kind':kind}
+                            if kind=='approval':key=approval_key(identity)
+                            elif kind=='mail':
+                                stream=opened.open(baseline.raw_path(source))
+                                key=mail_key(stream,names[source],begin,end)
+                                record['content']=message_digest(stream,begin,end,lambda done,total:progress('메일 원문 확인 ('+str(number)+'/'+str(self.count)+')',done,total))
+                            else:raise CollectionError('삭제할 자료 종류가 올바르지 않습니다.')
+                            record['key']=key
+                            output.write((json.dumps(record,separators=(',',':'))+'\n').encode('ascii'))
+                            if number%BATCH==0:progress('목록 삭제',number,self.count)
+                    if clean_files and plan.execute('SELECT 1 FROM raw_cleanup LIMIT 1').fetchone():
+                        sources=json.loads((self.root/'mail/sources.json').read_bytes())
                         sources['sources']=[item for item in sources.get('sources',[]) if not plan.execute('SELECT 1 FROM raw_cleanup WHERE source=?',(item['path'],)).fetchone()]
-                        atomic_write(staging/'mail/sources.json',json.dumps(sources,ensure_ascii=False).encode('utf-8'))
+                        atomic_write(prepared/'mail/sources.json',json.dumps(sources,ensure_ascii=False).encode('utf-8'))
                         manifest['counts']['mail_files']=len(sources['sources'])
-                with closing(sqlite3.connect(staging/'catalog.sqlite3')) as db:
-                    db.execute('PRAGMA temp_store=FILE')
-                    db.execute('PRAGMA cache_size=-8192')
-                    db.execute('ATTACH DATABASE ? AS deletion_plan',(str(self.path),))
-                    db.execute('PRAGMA secure_delete=ON')
-                    tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    for table in ('mail_dates','document_records','mail_records','items'):
-                        if table in tables:db.execute('DELETE FROM '+table+' WHERE id IN (SELECT id FROM deletion_plan.selected)')
-                    db.commit()
-                    for kind,count in db.execute('SELECT kind,count(*) FROM items GROUP BY kind'):
-                        manifest['counts'][kind]=count
-                    for kind in ('approval','mail'):
-                        if not db.execute('SELECT 1 FROM items WHERE kind=? LIMIT 1',(kind,)).fetchone():manifest['counts'][kind]=0
-                manifest['files']=files
-                for entry in manifest.get('coverage',[]):
-                    if entry.get('kind')=='mail_index':entry['saved']=manifest['counts'].get('mail',0)
-                manifest.pop('browser_index',None)
-                manifest['local_edits']={'protocol':PROTOCOL,'deleted_count':self.count,'edited_at':int(time.time())}
-                for name in ('catalog.json','catalog.sqlite3',TOMBSTONES):files[name]=digest_file(staging/name)
-                if (staging/'mail/sources.json').is_file():files['mail/sources.json']=digest_file(staging/'mail/sources.json')
-                atomic_write(staging/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
-                from .portable_mail import build_portable_mail
-                progress('검색 목록 갱신',0,None)
-                manifest=build_portable_mail(staging,manifest,changed_sources=set(),audit=True,
-                    progress=lambda stage,done=None,total=None,**kw:progress('메일 상태 확인',done,total))
-                from .search_page import install_search_page
-                install_search_page(staging,manifest,progress=lambda stage,done=None,total=None,**kw:progress('검색 목록 갱신',done,total))
-                progress('삭제 반영',self.count,self.count)
-                baseline._commit(staging,lambda:None,log)
-                staging=None
+                    with closing(sqlite3.connect(prepared/'catalog.sqlite3')) as db:
+                        db.execute('PRAGMA temp_store=FILE')
+                        db.execute('PRAGMA cache_size=-8192')
+                        db.execute('ATTACH DATABASE ? AS deletion_plan',(str(self.path),))
+                        db.execute('PRAGMA secure_delete=ON')
+                        tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        for table in ('mail_dates','document_records','mail_records','items'):
+                            if table in tables:db.execute('DELETE FROM '+table+' WHERE id IN (SELECT id FROM deletion_plan.selected)')
+                        db.commit()
+                        for kind in ('approval','mail'):
+                            manifest['counts'][kind]=db.execute('SELECT count(*) FROM items WHERE kind=?',(kind,)).fetchone()[0]
+                    for entry in manifest.get('coverage',[]):
+                        if entry.get('kind')=='mail_index':entry['saved']=manifest['counts'].get('mail',0)
+                    manifest['local_edits']={'protocol':PROTOCOL,'deleted_count':self.count,'edited_at':int(time.time())}
+                    removed.extend(update_mail(self.root,prepared,manifest,plan,original))
+                    progress('검색 목록 갱신',0,None)
+                    removed.extend(update_search(self.root,prepared,manifest,self.path,baseline,progress))
+                    for path in prepared.rglob('*'):
+                        if path.is_file():files[path.relative_to(prepared).as_posix()]=digest_file(path)
+                    atomic_write(prepared/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+                    def operations():
+                        if clean_files:
+                            yield from (row[0].rstrip('/') for row in plan.execute('SELECT prefix FROM cleanup WHERE shared=0'))
+                            yield from (row[0] for row in plan.execute('SELECT source FROM raw_cleanup'))
+                        yield from removed
+                    warnings.extend(commit(self.root,stage,operations(),self.signature,progress))
+                stage=None
                 return {'deleted':self.count,'warnings':warnings,'shared_mail_originals_retained':True}
             finally:
-                if staging and staging.is_dir():
-                    try:shutil.rmtree(staging)
+                if stage and stage.is_dir() and not journal_path(self.root).exists():
+                    try:shutil.rmtree(stage)
                     except OSError:pass

@@ -54,14 +54,14 @@ class LocalDeleteTests(unittest.TestCase):
     def test_prepare_failure_and_rename_failure_leave_entire_previous_backup_unchanged(self):
         original=self.fixture.snapshot()
         plan=self.plan(['approval-1'])
-        with patch('segio_archive.search_page.install_search_page',side_effect=OSError('synthetic failure')):
+        with patch('segio_archive.delete_index.update_search',side_effect=OSError('synthetic failure')):
             with self.assertRaises(OSError):plan.run()
         self.assertEqual(self.fixture.snapshot(),original)
         plan=self.plan(['approval-1'])
         import os
         replace=os.replace
         def reject(source,target):
-            if Path(source).name.startswith('.segio-delete-') and Path(target)==self.root:
+            if Path(source).name=='catalog.sqlite3' and Path(source).parent.name=='new' and Path(target)==self.root/'catalog.sqlite3':
                 raise PermissionError('synthetic commit failure')
             return replace(source,target)
         with patch('segio_archive.file_ops.os.replace',side_effect=reject):
@@ -170,6 +170,8 @@ class LocalDeleteTests(unittest.TestCase):
         manifest['counts']['approval']=count+1
         for name in ('catalog.json','catalog.sqlite3'):manifest['files'][name]=digest_file(self.root/name)
         (self.root/'manifest.json').write_text(json.dumps(manifest))
+        from segio_archive.search_page import install_search_page
+        install_search_page(self.root,manifest)
         plan=self.plan(ids=['approval-'+str(number) for number in range(2,count+2)],filters={'q':'Bulk','kind':'approval'})
         self.assertEqual(plan.count,count)
         phases=[]

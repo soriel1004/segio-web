@@ -66,9 +66,11 @@ def update_lock(root):
 class DateBaseline(Baseline):
     def __init__(self, root, user, checkpoint=lambda: None):
         root = Path(root).expanduser().resolve()
-        if not (root/'manifest.json').exists() and not self.journal(root).exists():
+        from .delete_transaction import recover as recover_delete,journal_path
+        if not (root/'manifest.json').exists() and not self.journal(root).exists() and not journal_path(root).exists():
             require_backup_file(root,'manifest.json')
         with update_lock(root):
+            recover_delete(root)
             self.recover(root)
         self.root, self.entries, self.sources = root, {}, []
         reason='manifest_invalid'
